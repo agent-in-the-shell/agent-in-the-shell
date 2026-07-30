@@ -1,0 +1,307 @@
+# agentmodel — example config
+#
+# Pre-flight:
+#   export AGENT_MODEL_TOKEN=$(openssl rand -hex 16)
+#   export OPENAI_API_KEY=...
+#   export ANTHROPIC_API_KEY=...                        # optional
+#   export ANTHROPIC_OAUTH_TOKEN=sk-ant-oat-...          # optional (Claude Pro/Max)
+#   export GEMINI_API_KEY=...                            # optional
+#   export DEEPSEEK_API_KEY=...                          # optional
+#   export REPLICATE_API_TOKEN=r8_...                    # optional (Replicate passthrough)
+#   agent-model chatgpt-login                            # optional (ChatGPT Pro)
+#
+#   agentmodel migrate --config config.yaml
+#   agentmodel serve --config config.yaml
+
+listen: ":8080"
+db: "agentmodel.db"
+auth:
+  bearer_token_env: "AGENT_MODEL_TOKEN"
+
+# How long a deployment is parked after a retryable failure (e.g. a 429)
+# before it is retried. Go duration string. Omit for the 5m default; set "0"
+# to disable cooling so a failed deployment is eligible again next request.
+router_cooldown: "5m"
+
+# Periodic re-validation of configured deployments against each provider's live
+# model list. Go duration string. Omit (the default) to run only the one-shot
+# check at startup; set e.g. "1h" to also re-check on that interval and log
+# drift appearing/resolving at runtime. The same interval is the TTL for the
+# cached provider model lists. Discovery of unconfigured upstream models is then
+# available via GET /v1/models?available.
+# revalidate_interval: "1h"
+
+model_list:
+  - model_name: "gpt-4"
+    deployments:
+      - provider: "openai"
+        model: "gpt-4o"
+        auth_mode: "api_key"
+        api_key_env: "OPENAI_API_KEY"
+        weight: 100
+
+  - model_name: "gpt-5"
+    deployments:
+      - provider: "openai"
+        model: "gpt-5"
+        auth_mode: "api_key"
+        api_key_env: "OPENAI_API_KEY"
+        weight: 100
+
+  - model_name: "claude"
+    deployments:
+      - provider: "anthropic"
+        model: "claude-3-5-sonnet-latest"
+        auth_mode: "api_key"
+        api_key_env: "ANTHROPIC_API_KEY"
+        weight: 70            # omit => 1; weight: 0 disables this deployment
+        cache_ttl: "5m"       # anthropic only: "" (default 5m), "5m", or "1h"
+      # Claude Pro/Max OAuth subscription. Two wiring modes:
+      #
+      #   (a) Static token (api_key_env). Token lifetime is ~12h. When the
+      #       upstream rejects with 401 you re-export from your auth source.
+      #
+      #   (b) Refreshable (oauth_token_dir). agent-model reads access +
+      #       refresh + expires from <dir>/auth.json (pi-mono-compatible
+      #       schema), refreshes against console.anthropic.com near expiry,
+      #       and writes the rotated tokens back. Symlink the dir at
+      #       ~/.pi/agent to share auth state with the pi CLI:
+      #         ln -sfn ~/.pi/agent ~/.config/agentmodel/anthropic
+      # Uncomment after `agent-model anthropic-login` — subscription auth
+      # requires an explicit, non-empty token directory to validate.
+      # - provider: "anthropic-oauth"
+      #   model: "claude-3-5-sonnet-latest"
+      #   auth_mode: "subscription"
+      #   oauth_token_dir: "~/.config/agentmodel/anthropic"
+      #   # Multi-account pool: list one auth.json dir per Claude subscription
+      #   # (mutually exclusive with oauth_token_dir). Log each in via
+      #   # `agent-model anthropic-login --token-dir <dir>` (or --profile <name>);
+      #   # every account keeps refreshing itself, and the pool rotates to the
+      #   # next one when a credential hits its rate limit.
+      #   # oauth_token_dirs:
+      #   #   - "/home/alice/.config/agentmodel/anthropic/work"
+      #   #   - "/home/alice/.config/agentmodel/anthropic/personal"
+      #   weight: 30
+
+  - model_name: "gemini"
+    deployments:
+      - provider: "gemini"
+        model: "gemini-2.5-pro"
+        auth_mode: "api_key"
+        api_key_env: "GEMINI_API_KEY"
+        weight: 100
+
+  # Uncomment after `agent-model chatgpt-login` — subscription auth requires
+  # an explicit, non-empty token directory to validate.
+  # - model_name: "chatgpt-pro"
+  #   deployments:
+  #     - provider: "chatgpt"
+  #       model: "gpt-5"
+  #       auth_mode: "subscription"
+  #       oauth_token_dir: "~/.config/agentmodel/chatgpt"
+  #       # Multi-account pool: list one auth.json dir per ChatGPT account
+  #       # (mutually exclusive with oauth_token_dir). Log each in via
+  #       # `agent-model chatgpt-login --token-dir <dir>`; the router rotates to
+  #       # the next account when one hits a rate limit.
+  #       # oauth_token_dirs:
+  #       #   - "~/.config/agentmodel/chatgpt"
+  #       #   - "~/.config/agentmodel/chatgpt-2"
+  #       weight: 100
+
+  # DeepSeek (OpenAI-compatible; Bearer auth via DEEPSEEK_API_KEY). deepseek-chat
+  # is V3; deepseek-reasoner is R1 (surfaces reasoning_content). No embeddings.
+  - model_name: "deepseek"
+    deployments:
+      - provider: "deepseek"
+        model: "deepseek-chat"
+        auth_mode: "api_key"
+        api_key_env: "DEEPSEEK_API_KEY"
+        weight: 100
+
+  - model_name: "deepseek-reasoner"
+    deployments:
+      - provider: "deepseek"
+        model: "deepseek-reasoner"
+        auth_mode: "api_key"
+        api_key_env: "DEEPSEEK_API_KEY"
+        weight: 100
+
+  # More OpenAI-compatible providers. A default endpoint ships for each, so you
+  # only set provider + api_key_env + the upstream model id (Bearer auth). The
+  # supported names: groq, mistral, together, xai, openrouter, fireworks,
+  # perplexity, deepinfra, nebius. Any OTHER OpenAI-wire vendor works too — just
+  # add base_url. Note: models are "unpriced" (cost $0, logged + warned, not
+  # metered against budget) until a matching entry is added to model_prices.json.
+  - model_name: "groq-llama"
+    deployments:
+      - provider: "groq"
+        model: "llama-3.3-70b-versatile"
+        auth_mode: "api_key"
+        api_key_env: "GROQ_API_KEY"
+        weight: 100
+  #  - model_name: "grok"
+  #    deployments:
+  #      - provider: "xai"            # -> https://api.x.ai/v1
+  #        model: "grok-2-latest"
+  #        api_key_env: "XAI_API_KEY"
+  #  - model_name: "openrouter-sonnet"
+  #    deployments:
+  #      - provider: "openrouter"     # aggregator: hundreds of models, one key
+  #        model: "anthropic/claude-3.5-sonnet"
+  #        api_key_env: "OPENROUTER_API_KEY"
+  # Chinese / open-source models (also first-class, OpenAI-compatible, Bearer):
+  #   zhipu (GLM), moonshot (Kimi), qwen (DashScope), yi, baichuan, stepfun, siliconflow
+  #  - model_name: "glm"
+  #    deployments:
+  #      - provider: "zhipu"          # -> open.bigmodel.cn/api/paas/v4
+  #        model: "glm-4-plus"
+  #        api_key_env: "ZHIPU_API_KEY"
+  #  - model_name: "qwen-max"
+  #    deployments:
+  #      - provider: "qwen"           # Alibaba DashScope OpenAI-compatible mode
+  #        model: "qwen-max"
+  #        api_key_env: "DASHSCOPE_API_KEY"
+  #  - model_name: "kimi"
+  #    deployments:
+  #      - provider: "moonshot"       # Kimi
+  #        model: "moonshot-v1-8k"
+  #        api_key_env: "MOONSHOT_API_KEY"
+  #  - model_name: "my-vendor"
+  #    deployments:
+  #      - provider: "myvendor"       # any other OpenAI-compatible endpoint
+  #        model: "some-model"
+  #        api_key_env: "MYVENDOR_API_KEY"
+  #        base_url: "https://api.myvendor.com/v1"
+
+  # Image generation (POST /v1/images/generations). Both providers normalize to
+  # the OpenAI-shaped images response; Gemini returns base64 inline data only.
+  - model_name: "image"
+    deployments:
+      - provider: "openai"
+        model: "gpt-image-1"
+        auth_mode: "api_key"
+        api_key_env: "OPENAI_API_KEY"
+        weight: 100
+
+  - model_name: "image-nano-banana"
+    deployments:
+      - provider: "gemini"
+        model: "gemini-2.5-flash-image"
+        auth_mode: "api_key"
+        api_key_env: "GEMINI_API_KEY"
+        weight: 100
+
+  # Video generation. Async: POST /v1/videos/generations returns a 202 with an
+  # operation id; poll GET /v1/videos/{id} until status is "succeeded". Veo runs
+  # on the Gemini API (predictLongRunning) — a single GEMINI_API_KEY.
+  - model_name: "veo-3"
+    deployments:
+      - provider: "gemini"
+        model: "veo-3.1-generate-preview"
+        auth_mode: "api_key"
+        api_key_env: "GEMINI_API_KEY"
+        weight: 100
+
+  # Replicate passthrough (#847). A RAW vendor-protocol surface (NOT the
+  # normalized OpenAI shape): consumers point REPLICATE_BASE_URL at the gateway
+  # and send the GATEWAY token; the gateway forwards POST /v1/predictions and
+  # POST /v1/models/{owner}/{name}/predictions to api.replicate.com, rewrites the
+  # response callback URLs back to itself, and logs each prediction. model_name
+  # and model are sentinels — dispatch selects this deployment by capability and
+  # reads the real Replicate model from the request body.
+  - model_name: "replicate"
+    deployments:
+      - provider: "replicate"
+        model: "passthrough"
+        auth_mode: "api_key"
+        api_key_env: "REPLICATE_API_TOKEN"
+        weight: 100
+
+  # --- Deployment options reference (all knobs; most optional) ---
+  # Every deployment under a model_name accepts, besides the
+  # provider / model / auth_mode / weight shown above:
+  #   api_key_env: "OPENAI_API_KEY"          # single credential env var
+  #   api_key_envs: ["KEY_A", "KEY_B"]       # OR a pool; router rotates on rate-limit
+  #   oauth_token_dir: ""                     # subscription auth.json dir (see above)
+  #   oauth_token_dirs: ["/abs/acct-a", "/abs/acct-b"]  # subscription multi-account pool
+  #   base_url: "http://localhost:11434/v1"   # override upstream (Ollama/vLLM/mirror)
+  #   rpm: 60                                  # per-deployment requests/min cap
+  #   tpm: 90000                               # per-deployment tokens/min cap
+  # Azure OpenAI only (provider: azure; base_url is the resource host):
+  #   api_version: "2024-10-01-preview"        # required Azure api-version
+  #   deployment_name: "my-gpt4o"              # Azure deployment (defaults to model)
+
+fallbacks:
+  # If gpt-4 fails (rate limit / outage), try Claude.
+  - model_name: "gpt-4"
+    fallback_to: ["claude"]
+  # If chatgpt-pro is rate limited, fall back to Anthropic Claude.
+  # (Uncomment together with the chatgpt-pro model block above.)
+  # - model_name: "chatgpt-pro"
+  #   fallback_to: ["claude", "gpt-4"]
+
+# Optional gateway-wide spend cap (USD). Enforced pre-call on the spending
+# endpoints (400 budget_exceeded) and reported on GET /v1/limits. Omit for none.
+# budget:
+#   max_budget: 100.0          # USD per window; omit for unlimited
+#   budget_duration: "720h"    # Go duration window; omit for a lifetime cap
+
+# Optional virtual API keys (#52): named bearer tokens, each read from its own
+# env var, with an optional per-key spend cap and model allowlist. They
+# authenticate independently of AGENT_MODEL_TOKEN and spend against the org
+# budget above. Keys can also be minted at runtime via POST /v1/keys (see API).
+# keys:
+#   - name: "ci"                       # identifier; shows on /v1/limits and in usage
+#     token_env: "AGENT_MODEL_KEY_CI"  # env var holding this key's bearer token
+#     max_budget: 25.0                 # optional per-key USD cap
+#     budget_duration: "24h"           # optional window; omit for lifetime
+#     models: ["gpt-4"]                # optional allowlist; omit to allow all
+
+# Optional observability sinks (both off by default). Only request metadata is
+# exported — never prompt/response content.
+telemetry:
+  metrics:
+    enabled: false          # serve GET /metrics (Prometheus), unauthenticated
+  tracing:
+    enabled: false          # export one OTLP span per request
+    service_name: agentmodel
+    # OTLP exporter is configured via standard env vars, e.g.:
+    #   export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+    #   export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ..."
+
+# Audit-log retention. Opt-in: with no period set, rows are kept forever.
+# The audit log is metadata-only (token counts, cost, latency, hashed key) —
+# never prompt/response content.
+retention:
+  period: ""                # e.g. "720h" to delete rows older than 30 days
+  interval: "1h"            # how often the background purge runs (default 1h)
+
+# Opt-in full request/response content log (off by default). Unlike the audit
+# log above, each record holds the RAW prompt and completion — restrict file
+# permissions and retention accordingly. Streaming responses are reassembled
+# into the final message. Covers /v1/chat/completions and /v1/messages.
+content_log:
+  path: ""                  # e.g. "/var/log/agentmodel/content.jsonl"; empty = disabled
+  # Rotation, compression, and retention (all opt-in, independent). With none
+  # set the log is a single unbounded file. Rotation runs under the write lock,
+  # so no line is split or lost. Rotation success/failure and the on-disk
+  # footprint are exported as metrics (agentmodel_content_log_*) — alert on
+  # rotation failures and abnormal agentmodel_content_log_disk_bytes growth.
+  max_size_mb: 0            # rotate when the active file passes this size; 0 = no size rotation
+  rotate_every: ""          # rotate when the active file reaches this age, e.g. "24h"; empty = off
+  compress: false           # gzip rotated files (adds a .gz suffix)
+  max_backups: 0            # keep at most N rotated files; 0 = unlimited
+  max_age: ""               # delete rotated files older than this, e.g. "720h"; empty = keep
+  max_total_mb: 0           # delete oldest rotated files until active+backups fits; 0 = unlimited
+
+# Opt-in response cache for non-streaming /v1/chat/completions (off by default).
+# An in-memory LRU (L1) optionally backed by a persistent SQLite file (L2). A
+# cache hit returns the original response and is recorded in the ledger at $0
+# (cost_source "cache"), so it never advances a budget. Streaming requests are
+# not cached. Identical requests return identical bodies — enable only where
+# that is acceptable (e.g. high temperature still replays the cached completion).
+cache:
+  enabled: false            # turn the response cache on
+  ttl: "10m"                # entry lifetime; empty/"0" = no expiry (L1 LRU-bounded)
+  max_items: 1000           # in-memory LRU capacity (default 1000)
+  sqlite_path: ""           # optional persistent L2 path; empty = memory-only

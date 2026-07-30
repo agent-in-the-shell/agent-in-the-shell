@@ -1,0 +1,9 @@
+# Local state the quick start creates in the checkout.
+config.yaml
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Build output.
+dist/
