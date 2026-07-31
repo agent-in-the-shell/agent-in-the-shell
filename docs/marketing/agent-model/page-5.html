@@ -1,0 +1,24 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><link rel="stylesheet" href="style.css"></head><body>
+<svg width="0" height="0" style="position:absolute"><filter id="rough" x="-5%" y="-5%" width="110%" height="110%"><feTurbulence type="fractalNoise" baseFrequency="0.018 0.03" numOctaves="2" seed="7" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="6"/></filter></svg>
+<div class="page">
+  <div class="idx">5 / 7</div>
+  <div class="h1"><span class="spark">≥</span><span class="cjk">差在哪？</span><span class="spark">≤</span>
+    <svg class="uline" viewBox="0 0 320 16" style="width:320px" fill="none"><path d="M8 9 C80 3,140 14,200 7 S300 5,312 10" stroke="#2f9a52" stroke-width="5" stroke-linecap="round"/></svg>
+  </div>
+  <div class="hookwrap"><span class="hook"><span class="s">✦</span>直接接 provider　vs.　用 agent-model<span class="s">✦</span></span></div>
+
+  <div class="cmp">
+    <div class="r hd"><div class="asp"></div><div class="old">❌ 直接接</div><div class="new">✅ agent-model</div></div>
+    <div class="r"><div class="asp">換模型</div><div class="old">改程式、重部署</div><div class="new">改一行 YAML</div></div>
+    <div class="r"><div class="asp">供應商掛 / 429</div><div class="old">自己寫 retry</div><div class="new">自動 fallback</div></div>
+    <div class="r"><div class="asp">計費</div><div class="old">各家分開算</div><div class="new">統一記帳 (metadata)</div></div>
+    <div class="r"><div class="asp">認證</div><div class="old">只能 API key</div><div class="new">key 或訂閱</div></div>
+  </div>
+
+  <div class="bottom" style="margin-top:30px">
+    <div class="take"><span class="s">＋</span>還有 虛擬金鑰・預算上限・回應快取<span class="s">＋</span></div>
+    <svg class="tline" viewBox="0 0 620 14" fill="none"><path d="M6 8 C130 3,270 12,400 6 S580 5,614 9" stroke="#e5432a" stroke-width="5" stroke-linecap="round"/></svg>
+  </div>
+  <div class="brand">agent-in-the-shell · agent-model</div>
+</div>
+</body></html>

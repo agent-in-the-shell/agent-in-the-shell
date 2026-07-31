@@ -1,0 +1,25 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><link rel="stylesheet" href="style.css"></head><body>
+<svg width="0" height="0" style="position:absolute"><filter id="rough" x="-5%" y="-5%" width="110%" height="110%"><feTurbulence type="fractalNoise" baseFrequency="0.018 0.03" numOctaves="2" seed="9" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="6"/></filter></svg>
+<div class="page">
+  <div class="idx">4 / 7</div>
+  <div class="h1"><span class="spark">≥</span><span class="cjk">它怎麼運作？</span><span class="spark">≤</span>
+    <svg class="uline" viewBox="0 0 420 16" style="width:420px" fill="none"><path d="M8 9 C100 3,180 14,260 7 S390 5,412 10" stroke="#2f9a52" stroke-width="5" stroke-linecap="round"/></svg>
+  </div>
+  <div class="hookwrap"><span class="hook"><span class="s">✦</span>你的 app 只對「一個」endpoint 說話<span class="s">✦</span></span></div>
+
+  <div class="flow">
+    <div class="node"><div class="t">你的 app</div><div class="d">照打 OpenAI SDK · /v1/chat/completions</div></div>
+    <div class="arrow">
+      <svg width="30" height="60" viewBox="0 0 30 60" fill="none" stroke="#5c5b55" stroke-width="4" stroke-linecap="round"><path d="M15 6 V54 M6 44 L15 54 L24 44"/></svg>
+      <span class="lbl">request</span>
+    </div>
+    <div class="node mid"><div class="t">agent-model gateway</div><div class="d">routing · fallback · 計費 · 快取</div></div>
+    <div class="arrow">
+      <svg width="30" height="60" viewBox="0 0 30 60" fill="none" stroke="#5c5b55" stroke-width="4" stroke-linecap="round"><path d="M15 6 V54 M6 44 L15 54 L24 44"/></svg>
+      <span class="lbl">依設定挑供應商</span>
+    </div>
+    <div class="node"><div class="t">OpenAI · Anthropic · Gemini …</div><div class="d">掛了就自動切下一家 ↺</div></div>
+  </div>
+  <div class="brand">agent-in-the-shell · agent-model</div>
+</div>
+</body></html>
