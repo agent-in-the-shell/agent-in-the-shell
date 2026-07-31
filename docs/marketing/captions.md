@@ -4,9 +4,8 @@ Draft launch copy to accompany the carousels. Same grounding rules as the on-ima
 accurate to `docs/agentmodel.md`, **responsible framing** (subscription/multi-account = a
 supported auth mode + a ToS line, never quota-evasion), no absolute overclaims.
 
-> **Repo note:** CTAs say "GitHub 搜 agent-in-the-shell". The public repo doesn't exist
-> until the release **M0** ships — this is launch-ready copy; don't post until the repo is live.
-> RedNote can't do inline links, so CTAs use a search hint + optional comment-gate.
+> RedNote can't do inline links, so CTAs use a search hint ("GitHub 搜
+> agent-in-the-shell") plus an optional comment-gate.
 
 ---
 
