@@ -198,9 +198,9 @@ func TestToolCallArgumentsAreString(t *testing.T) {
 	}
 }
 
-// TestUsageAgenticaExtensions verifies our extension fields (CostUSD, AuthMode)
+// TestUsageGatewayExtensions verifies the gateway extension fields (CostUSD, AuthMode)
 // are preserved and omitted when zero.
-func TestUsageAgenticaExtensions(t *testing.T) {
+func TestUsageGatewayExtensions(t *testing.T) {
 	usage := wire.Usage{
 		PromptTokens:     100,
 		CompletionTokens: 50,

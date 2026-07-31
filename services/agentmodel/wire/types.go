@@ -238,7 +238,7 @@ type Choice struct {
 	FinishReason string  `json:"finish_reason"`
 }
 
-// Usage holds token counts and Agentica-specific cost / auth-mode extensions.
+// Usage holds token counts and the gateway-specific cost / auth-mode extensions.
 //
 // CostUSD is 0 for subscription-based requests (Claude Pro/Max OAuth, ChatGPT
 // subscription) since per-token cost is not meaningful when the user has paid
