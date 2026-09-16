@@ -769,7 +769,7 @@ portal:
   origin: https://portal.example.com
   gateway_origin: https://agent-model.example.com # base URL shown to clients; optional
   issuer: https://your-team.cloudflareaccess.com
-  audience: e74d87962a061c972188da0ecb062212a408c179ef26fbfec9071591b7fb0854
+  audience: YOUR_CLOUDFLARE_ACCESS_APPLICATION_AUD
   email_domain: example.com # set the exact authorized employee domain
   admin_emails: [admin@example.com] # exact verified emails, not proxy headers
 ```
