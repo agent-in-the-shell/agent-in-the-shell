@@ -12,7 +12,7 @@ import (
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/provider"
 )
 
-// Video generation dispatch (issue #841). Video is the gateway's first async
+// Video generation dispatch. Video is the gateway's first async
 // modality: GenerateVideo submits a job and returns an opaque gateway operation
 // id; PollVideo resolves that id back to the owning deployment and reports
 // status. The router holds no operation state — the id encodes (logical model,

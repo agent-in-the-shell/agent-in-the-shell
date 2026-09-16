@@ -23,11 +23,7 @@ func TestCLICommandsDocumented(t *testing.T) {
 		t.Fatal("no commands extracted from the os.Args[1] switch — parser or dispatch shape changed")
 	}
 
-	docs, err := os.ReadFile("../../docs/agentmodel.md")
-	if err != nil {
-		t.Fatalf("read docs/agentmodel.md: %v", err)
-	}
-	docsText := string(docs)
+	docsText := commandsBlock(t, "../../docs/agentmodel.md")
 
 	for _, c := range cmds {
 		needle := "agent-model " + c
@@ -38,6 +34,36 @@ func TestCLICommandsDocumented(t *testing.T) {
 			t.Errorf("command %q is dispatched but missing from the ## Commands block in docs/agentmodel.md", c)
 		}
 	}
+}
+
+// commandsBlock returns the fenced code block that follows the "## Commands"
+// heading — the list this test actually claims to guard.
+//
+// It used to search the whole file, which quietly stopped checking anything the
+// moment prose elsewhere in the doc mentioned a command by name: the `limits`
+// entry could be deleted from the block and CI would still pass, because
+// "agent-model limits" also appears in a usage example further down. Scoping to
+// the structure rather than to a substring is the same lesson  records
+// after this family of guard was defeated twice the same way.
+func commandsBlock(t *testing.T, path string) string {
+	t.Helper()
+	docs, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	_, after, ok := strings.Cut(string(docs), "\n## Commands\n")
+	if !ok {
+		t.Fatalf("%s has no '## Commands' heading — the doc's structure changed", path)
+	}
+	_, after, ok = strings.Cut(after, "```\n")
+	if !ok {
+		t.Fatalf("%s: no fenced block opens after '## Commands'", path)
+	}
+	block, _, ok := strings.Cut(after, "```")
+	if !ok {
+		t.Fatalf("%s: the block after '## Commands' is never closed", path)
+	}
+	return block
 }
 
 // dispatchedCommands parses main.go and returns the case values of the

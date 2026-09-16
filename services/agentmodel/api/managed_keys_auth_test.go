@@ -40,7 +40,7 @@ func TestManagedKey_Authenticates(t *testing.T) {
 	}
 
 	// Usage is attributed to the key's hash — the metering half this work
-	// builds on (#922).
+	// builds on.
 	logs, err := st.ListByAPIKey(context.Background(), sha256hex(tok), time.Time{}, 10)
 	if err != nil {
 		t.Fatalf("ListByAPIKey: %v", err)

@@ -10,7 +10,7 @@ import (
 // GET /v1/limits — quota/rate-limit snapshot.
 //
 // This is the read side of the rate-limit control plane: callers (agent-shell's
-// `limits` probe, agent-pi, agent-run) poll it to learn each deployment's
+// `limits` probe and other HTTP clients) poll it to learn each deployment's
 // configured caps and whether any deployment is currently parked in a cooldown,
 // so they can make routing/backoff decisions without burning a request.
 //
@@ -24,7 +24,7 @@ import (
 // "tokens") carrying live current-minute consumption from the router's rate
 // meter: used/remaining/used_percent, with window_status "limited" + a reset
 // at the next minute boundary once the cap is reached — the same counters
-// pre-call enforcement (#46) skips deployments on. A deployment currently in
+// pre-call enforcement skips deployments on. A deployment currently in
 // a failure cooldown is likewise "limited" with reset_at/reset_in_seconds; if
 // it has no configured caps, a synthetic "cooldown" window carries that
 // signal so the state is visible regardless.
@@ -32,8 +32,8 @@ import (
 // Configured spend caps (config `budget` and `keys[].max_budget`) are reported
 // the same way, one window per cap with unit "usd" (org/<id>:budget,
 // key/<name>:budget). Budgets ARE enforced on the spending endpoints
-// (400 budget_exceeded, #47/#52), but this endpoint does not yet meter live
-// spend (#500), so used/remaining stay null and budget windows always report
+// (400 budget_exceeded), but this endpoint does not yet meter live
+// spend, so used/remaining stay null and budget windows always report
 // status "ok" — the rejection itself is the live exhaustion signal for now.
 
 const (
@@ -150,8 +150,8 @@ func (s *Server) budgetWindows(now time.Time) []limitWindow {
 }
 
 // budgetWindow builds a window for one spend cap. Used/remaining are left nil
-// and the status is always "ok" until live metering lands (#500) — budgets
-// are enforced at request time (#47), just not yet observable here.
+// and the status is always "ok" until live metering lands — budgets
+// are enforced at request time, just not yet observable here.
 func budgetWindow(name string, cap *spendCap, now time.Time) limitWindow {
 	limit := cap.maxUSD
 	desc := "lifetime cap; never resets"
@@ -173,7 +173,7 @@ func budgetWindow(name string, cap *spendCap, now time.Time) limitWindow {
 }
 
 // fillUsage adds the live current-minute consumption to an rpm/tpm window
-// (#46 metering): used, remaining, used_percent, and — when the cap is
+// metering: used, remaining, used_percent, and — when the cap is
 // reached — window_status "limited" with a reset at the next minute boundary,
 // matching what pre-call enforcement will do to requests until then.
 //

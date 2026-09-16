@@ -1,0 +1,13 @@
+# Minimal API-key gateway. Replace model with an upstream model available to you.
+listen: "127.0.0.1:8080"
+db: "agentmodel.db"
+auth:
+  bearer_token_env: "AGENT_MODEL_TOKEN"
+model_list:
+  - model_name: "default"
+    deployments:
+      - provider: "openai"
+        model: "gpt-4o-mini"
+        auth_mode: "api_key"
+        api_key_env: "OPENAI_API_KEY"
+        weight: 100

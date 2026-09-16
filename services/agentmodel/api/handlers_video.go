@@ -34,7 +34,7 @@ func (s *Server) createVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pre-request enforcement (#47/#52). Video has no fallback walk, so the
+	// Pre-request enforcement. Video has no fallback walk, so the
 	// entry-model allowlist + budget check alone bounds access.
 	if ae := s.enforce(r.Context(), vkFromCtx(r.Context()), req.Model); ae != nil {
 		s.logVideoFailure(r.Context(), req, ae, 0)
@@ -74,7 +74,7 @@ func (s *Server) getVideo(w http.ResponseWriter, r *http.Request) {
 	}
 	// Rewrite each result URL from the raw upstream asset (which needs the
 	// gateway's provider credential and would 401 the client) to a gateway
-	// content URL the client can fetch with its own bearer (#1493). Only rewrite
+	// content URL the client can fetch with its own bearer. Only rewrite
 	// when the provider actually needs proxying (implements VideoDownloader) —
 	// a future provider whose asset URLs are public (e.g. Replicate) is passed
 	// through unchanged rather than pointed at a /content route that would fail.
@@ -99,10 +99,10 @@ func (s *Server) gatewayVideoContentURL(r *http.Request, id string) string {
 
 // downloadVideoContent handles GET /v1/videos/{id}/content — it streams the
 // result video's bytes, fetched from the upstream with the gateway's provider
-// credential, so a client without that credential can retrieve the asset
-// (#1493). Interim limitation: it does not honor Range nor forward
+// credential, so a client without that credential can retrieve the asset.
+// Interim limitation: it does not honor Range nor forward
 // Content-Length (no seek / progress) — serving via http.ServeContent from
-// persisted bytes is the #841 follow-up.
+// persisted bytes is the follow-up.
 func (s *Server) downloadVideoContent(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
@@ -129,7 +129,7 @@ func (s *Server) downloadVideoContent(w http.ResponseWriter, r *http.Request) {
 }
 
 // logVideoSubmit records the audit row for an accepted submission. Per-call /
-// per-second video cost metering is a follow-up (#841), so the row carries no
+// per-second video cost metering is a follow-up, so the row carries no
 // token counts or cost today; the poll (a read) is not logged.
 func (s *Server) logVideoSubmit(ctx context.Context, req agentmodel.GenerateVideoRequest, op agentmodel.VideoOperation, latency time.Duration) {
 	s.writeRequestLog(ctx, buildUsageLog(req.Model, op.Model, agentmodel.Usage{}, latency, statusOk, "", ""))

@@ -151,7 +151,7 @@ func TestRegistry_NamesAndGet(t *testing.T) {
 	}
 }
 
-// TestNewRegistry_DefaultIsDeterministic guards #1494: the default provider is
+// TestNewRegistry_DefaultIsDeterministic guards : the default provider is
 // the lexicographically-first name, stable across builds — not a random pick
 // from Go's map-iteration order.
 func TestNewRegistry_DefaultIsDeterministic(t *testing.T) {

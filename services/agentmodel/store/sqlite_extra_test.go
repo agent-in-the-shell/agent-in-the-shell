@@ -135,11 +135,15 @@ func TestListByAPIKey_DefaultLimit(t *testing.T) {
 }
 
 // TestOpenSQLite_MigrateError forces db.Exec(sqliteSchema) to fail by pointing
-// the DSN at a path that is itself an existing directory. EnsureParent (the new
-// parent-mkdir step) succeeds because the parent already exists, and sql.Open
-// succeeds lazily, but the first Exec (the CREATE TABLE migration) cannot open a
-// directory as a database file, so the wrapped "migrate" error must be returned.
-func TestOpenSQLite_MigrateError(t *testing.T) {
+// the DSN at a path that is itself an existing directory. EnsureParent succeeds
+// because the parent already exists, and the failure must surface as a wrapped
+// error with no store handed back.
+//
+// This used to reach the CREATE TABLE migration and assert on "migrate".
+// SecureSQLiteFile now runs before the open and refuses the directory
+// first, which is the same verdict earlier and with the path named — so the
+// assertion is on the wrapped path rather than on which step caught it.
+func TestOpenSQLite_UnusablePathError(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	// The DB path is itself a directory: parent exists (EnsureParent is a no-op)
@@ -154,13 +158,16 @@ func TestOpenSQLite_MigrateError(t *testing.T) {
 		if s != nil {
 			_ = s.Close()
 		}
-		t.Fatalf("OpenSQLite(%q): want migrate error, got nil", badPath)
+		t.Fatalf("OpenSQLite(%q): want an error, got nil", badPath)
 	}
 	if s != nil {
 		t.Fatalf("OpenSQLite returned non-nil store alongside error: %v", s)
 	}
-	if !strings.Contains(err.Error(), "migrate") {
-		t.Errorf("error should be the wrapped migrate failure, got: %v", err)
+	if !strings.Contains(err.Error(), badPath) {
+		t.Errorf("error should name the offending path, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "agentmodel/store") {
+		t.Errorf("error should be wrapped with the package prefix, got: %v", err)
 	}
 }
 

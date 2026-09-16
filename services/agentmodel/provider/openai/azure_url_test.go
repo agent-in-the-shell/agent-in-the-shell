@@ -2,7 +2,7 @@ package openai
 
 import "testing"
 
-// Azure mode (#892) rewrites OpenAI-relative paths to the deployment-scoped
+// Azure mode rewrites OpenAI-relative paths to the deployment-scoped
 // layout and appends the required api-version query; standard mode is untouched.
 func TestResolveURL(t *testing.T) {
 	std := NewWithBaseURL(nil, "https://api.openai.com/v1")

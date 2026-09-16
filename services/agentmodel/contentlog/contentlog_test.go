@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -164,7 +165,7 @@ func str(n int) string {
 	return string(b)
 }
 
-// ─── rotation / compression / retention (#1399) ────────────────────────────
+// ─── rotation / compression / retention ────────────────────────────
 
 // bigRecord returns a Record whose JSON line is at least n bytes, so a size
 // policy can be tripped in a predictable number of writes.
@@ -209,16 +210,22 @@ func countAllRecords(t *testing.T, path string) int {
 	return total
 }
 
+// backups lists the rotated files beside path. It enumerates with ReadDir for
+// the same reason listBackups does: globbing path+".*" interpolates the
+// path into a pattern, so a directory name containing a metacharacter would
+// silently enumerate somewhere else and report nothing.
 func backups(t *testing.T, path string) []string {
 	t.Helper()
-	matches, err := filepath.Glob(path + ".*")
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("glob: %v", err)
+		t.Fatalf("ReadDir: %v", err)
 	}
 	var out []string
-	for _, m := range matches {
-		if m != path {
-			out = append(out, m)
+	for _, e := range entries {
+		full := filepath.Join(dir, e.Name())
+		if full != path && strings.HasPrefix(full, path+".") {
+			out = append(out, full)
 		}
 	}
 	sort.Strings(out)
@@ -333,6 +340,151 @@ func TestRetention_MaxBackups(t *testing.T) {
 	}
 }
 
+// The 0600 in OpenFile only applies when the file is CREATED, so a content log
+// that already exists keeps whatever mode it had — and this file holds raw,
+// unredacted prompts and completions. An external logrotate with `create 0644`,
+// a restore from backup, or a plain `touch` under the default umask all produce
+// a world-readable file with no warning.
+func TestOpen_TightensPermissionsOnExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.jsonl")
+	if err := os.WriteFile(path, []byte(`{"pre":"existing"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	// Chmod explicitly rather than via WriteFile's perm, which umask masks.
+	// 0644 is what an external logrotate's `create` leaves behind; any mode
+	// other than 0600 takes the same branch, so one case covers it.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	lg, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = lg.Close() })
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode = %v, want 0600 — raw prompt/completion content is readable by others", got)
+	}
+	// The pre-existing content must survive: this is an append log, and
+	// tightening the mode must not be confused with truncating.
+	if lg.size == 0 {
+		t.Error("size = 0, want the existing file's length — Open must append, not truncate")
+	}
+}
+
+// rotate() reopens the active path after a failed close or rename, which lands
+// on the pre-existing file rather than a fresh one — the same hole as Open.
+func TestReopen_TightensPermissionsOnExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.jsonl")
+	if err := os.WriteFile(path, []byte("x\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	lg := &Logger{path: path, now: time.Now}
+	if err := lg.reopen(); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = lg.f.Close() })
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode after reopen = %v, want 0600", got)
+	}
+}
+
+// See listBackups: an operator path containing a glob metacharacter enumerated
+// a sibling directory and never saw its own backups, so retention silently
+// stopped pruning for that deployment.
+func TestRetention_PathWithGlobMetacharacters(t *testing.T) {
+	// "agent[1]" is a literal directory name; read as a glob pattern it is the
+	// character class [1], i.e. "agent1".
+	real := filepath.Join(t.TempDir(), "agent[1]")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	path := filepath.Join(real, "content.jsonl")
+
+	lg, err := OpenWithOptions(path, Options{MaxSizeBytes: 250, MaxBackups: 1})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	clk := time.Unix(0, 0).UTC()
+	lg.now = func() time.Time { clk = clk.Add(time.Second); return clk }
+	for i := 0; i < 30; i++ {
+		if err := lg.Log(bigRecord(200)); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+	lg.Close()
+
+	if got := len(backups(t, path)); got != 1 {
+		t.Errorf("surviving backups in %q = %d, want 1 (MaxBackups) — retention never saw its own files",
+			filepath.Base(real), got)
+	}
+}
+
+// Retention must only ever delete files it created; see backupTime for why the
+// blast radius makes that worth a test.
+func TestRetention_LeavesForeignFilesAlone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.jsonl")
+
+	foreign := []string{
+		path + ".bak",           // hand-made copy
+		path + ".1",             // logrotate
+		path + ".2.gz",          // logrotate, compressed
+		path + ".manual-backup", // a "-" that is not our dedup counter
+	}
+	for _, f := range foreign {
+		if err := os.WriteFile(f, []byte("precious"), 0o600); err != nil {
+			t.Fatalf("WriteFile %s: %v", f, err)
+		}
+	}
+
+	// MaxBackups: 1 with plenty of rotations — the most aggressive pruning the
+	// count policy can apply.
+	lg, err := OpenWithOptions(path, Options{MaxSizeBytes: 250, MaxBackups: 1})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	clk := time.Unix(0, 0).UTC()
+	lg.now = func() time.Time { clk = clk.Add(time.Second); return clk }
+	for i := 0; i < 30; i++ {
+		if err := lg.Log(bigRecord(200)); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+	lg.Close()
+
+	for _, f := range foreign {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("retention deleted a file it did not create: %s (%v)", filepath.Base(f), err)
+		}
+	}
+	// Without this the test also passes when retention prunes nothing at all —
+	// the opposite failure of the one above, and the one this fix could plausibly
+	// cause by rejecting our own names too.
+	ours := 0
+	for _, b := range backups(t, path) {
+		if _, isOurs := lg.backupTime(b); isOurs {
+			ours++
+		}
+	}
+	if ours != 1 {
+		t.Errorf("surviving rotated backups = %d, want 1 (MaxBackups) — retention did not run", ours)
+	}
+}
+
 func TestRetention_MaxTotalBytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "content.jsonl")
 	// Each line ~230B. Cap total at ~600B: a couple of backups plus the active
@@ -424,5 +576,52 @@ func TestOpen_NoOptionsUnbounded(t *testing.T) {
 	lg.Close()
 	if got := len(backups(t, path)); got != 0 {
 		t.Errorf("unbounded logger rotated: %d backups", got)
+	}
+}
+
+// Rotated backups hold the same raw prompts and completions as the active file,
+// and nothing revisits them once written — enforceRetention only deletes. A
+// backup left 0644 by an external rotator or a restore stayed readable for as
+// long as retention kept it, which is 's hole one file over.
+func TestOpen_TightensExistingBackups(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.jsonl")
+	lg, err := OpenWithOptions(path, Options{MaxSizeBytes: 250, Compress: true, MaxBackups: 5})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	clk := time.Unix(0, 0).UTC()
+	lg.now = func() time.Time { clk = clk.Add(time.Second); return clk }
+	for i := 0; i < 6; i++ {
+		if err := lg.Log(bigRecord(200)); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+	lg.Close()
+
+	loosened := backups(t, path)
+	if len(loosened) == 0 {
+		t.Fatal("no backups produced; the test would assert nothing")
+	}
+	for _, b := range loosened {
+		if err := os.Chmod(b, 0o644); err != nil {
+			t.Fatalf("Chmod %s: %v", b, err)
+		}
+	}
+
+	lg2, err := OpenWithOptions(path, Options{MaxSizeBytes: 250, Compress: true, MaxBackups: 5})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = lg2.Close() })
+
+	for _, b := range backups(t, path) {
+		fi, err := os.Stat(b)
+		if err != nil {
+			t.Fatalf("Stat %s: %v", b, err)
+		}
+		if got := fi.Mode().Perm(); got != 0o600 {
+			t.Errorf("backup %s mode = %v, want 0600 — rotated content is readable by other local users",
+				filepath.Base(b), got)
+		}
 	}
 }

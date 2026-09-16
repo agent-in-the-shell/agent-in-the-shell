@@ -235,8 +235,7 @@ func OpenSQLiteReadOnly(path string) (*SQLiteStore, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	if err := db.PingContext(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("agentmodel/store: open read-only %q: %w", path, err)
+		return nil, errors.Join(fmt.Errorf("agentmodel/store: open read-only %q: %w", path, err), db.Close())
 	}
-	return &SQLiteStore{db: db}, nil
+	return &SQLiteStore{db: db, reporting: db}, nil
 }

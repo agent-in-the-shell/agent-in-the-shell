@@ -1,0 +1,1099 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>agent-model</title>
+<style nonce="{{NONCE}}">
+{{SHARED_CSS}}
+/* Admin-only components on top of the shared fragment. Rule of thumb for the whole page:
+   one component per job (tab bar, toolbar, table, notes) and no browser-default chrome
+   (no <details> triangles, no link-blue navigation). */
+
+.service-create { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-bottom: var(--pitch); }
+.service-secret { padding: 14px; border-left: 3px solid var(--warn); background: var(--glass); margin-bottom: var(--pitch); }
+.service-secret pre { white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+
+/* Tab bar: sits on the header's rule. The current tab is inked, the rest are muted text. */
+.tabs { display: flex; gap: 28px; padding: 0 var(--edge); border-bottom: 1px solid var(--line); }
+.tabs a { padding: 10px 2px 12px; margin-bottom: -1px; color: var(--muted); text-decoration: none; font-weight: 500; border-bottom: 2px solid transparent; }
+.tabs a:hover { color: var(--ink); }
+.tabs a[aria-current="page"] { color: var(--ink); font-weight: 650; border-bottom-color: var(--ink); }
+
+main { gap: calc(var(--pitch) * 2); }
+.card-head { margin-bottom: var(--pitch); }
+.card-head .hint { flex-basis: auto; }
+.hint { margin: 0; font-size: 0.82rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Form controls share one shape so the toolbar reads as one row, not five widgets. */
+.field { display: grid; gap: 4px; min-width: 0; }
+.field > span { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.field input, .field select {
+  font: inherit;
+  min-height: 36px;
+  padding: 0 10px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.field input::placeholder { color: var(--muted); opacity: 0.8; }
+.field input:hover, .field select:hover { border-color: var(--muted); }
+.field select { font-family: var(--sans); font-size: inherit; padding-right: 28px; }
+input[type="search"] { border-color: var(--line); border-radius: 4px; background: var(--card); }
+input[type="search"]:hover { border-color: var(--muted); }
+
+/* Toolbar: the time range on the left, actions on the right. Detailed filters live in a
+   panel toggled by the Filters button; the button carries a count so the panel can stay
+   closed without hiding that filters are in effect. */
+.toolbar { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px 24px; }
+.range { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.range .field input { width: 250px; max-width: 100%; }
+.range .sep { padding-bottom: 9px; color: var(--muted); }
+.toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+button { border-radius: 4px; }
+button.ghost { border-color: transparent; color: var(--muted); }
+button.ghost:hover:not(:disabled) { color: var(--ink); background: var(--glass); }
+button.toggle[aria-expanded="true"] { background: var(--glass); border-color: var(--muted); }
+.count { display: inline-block; min-width: 20px; margin-left: 8px; padding: 0 6px; border-radius: 10px; background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 0.72rem; line-height: 20px; text-align: center; }
+.filter-panel .field input, .filter-panel .field select { width: 100%; min-width: 0; }
+.filter-panel {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px 16px;
+  margin-top: 12px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+/* Applied filters as removable chips. Removing one goes through the router like every
+   other navigation, so the URL stays the source of truth. */
+.applied { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 0; padding: 0; list-style: none; }
+.applied li { display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px 2px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--glass); font-size: 0.82rem; }
+.applied li b { font-weight: 500; color: var(--muted); }
+.applied li code { font-size: 0.85em; }
+.applied li button { min-height: 22px; padding: 0 6px; border: 0; border-radius: 3px; color: var(--muted); font-size: 0.9rem; line-height: 1; }
+.applied li button:hover { color: var(--ink); }
+
+.ledger { margin: calc(var(--pitch) * 1.5) 0; }
+.ledger.compact dd { font-size: 1rem; font-weight: 500; letter-spacing: 0; }
+.ledger.compact { gap: 12px calc(var(--pitch) * 2); }
+
+/* Chart: bars on a baseline with the covered range as axis labels. */
+.chart-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; margin-top: calc(var(--pitch) * 1.5); }
+.chart-head h3 { margin: 0; }
+.trend { display: block; width: 100%; height: 160px; margin-top: 10px; color: var(--accent); }
+.trend rect { fill: currentColor; opacity: 0.85; }
+@media (hover: hover) { .trend rect:hover { opacity: 1; } }
+.trend .baseline { stroke: var(--line); stroke-width: 1; }
+.axis { display: flex; justify-content: space-between; margin-top: 4px; font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+.empty { margin: 10px 0 0; padding: 28px 12px; border: 1px dashed var(--line); border-radius: 6px; background: none; color: var(--muted); text-align: center; max-width: none; }
+
+.monitor-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--pitch) calc(var(--pitch) * 2); margin-top: calc(var(--pitch) * 1.5); }
+.monitor-groups h3 { margin: 0 0 8px; }
+.monitor-groups > div { min-width: 0; }
+.monitor-groups table { min-width: 420px; }
+@media (max-width: 720px) { .monitor-groups { grid-template-columns: minmax(0, 1fr); } }
+
+/* Tables: hairline rows, numbers right-aligned in tabular figures, identifiers in mono.
+   Wide tables scroll inside .scroll; the page never scrolls sideways. */
+.scroll { overflow-x: auto; border-top: 1px solid var(--line); }
+table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+th, td { text-align: left; padding: 10px 12px; vertical-align: top; }
+th { position: sticky; top: 0; font-family: var(--mono); font-size: 0.72rem; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); white-space: nowrap; background: var(--glass); }
+td { border-bottom: 1px solid var(--line); }
+tbody tr:hover { background: var(--glass); }
+tbody tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; }
+td.mono, .cell-id { font-family: var(--mono); font-size: 0.82rem; }
+td .sub { display: block; font-size: 0.8rem; color: var(--muted); }
+td .sub.mono { font-family: var(--mono); font-size: 0.76rem; }
+#request-metadata { margin-top: var(--pitch); }
+table.requests { min-width: 1480px; }
+table.requests td { white-space: nowrap; }
+table.keys { min-width: 1080px; }
+table.keys td.name a { font-size: 0.82rem; }
+.empty-row td { text-align: center; color: var(--muted); padding: 28px 12px; }
+.pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 12px; margin-top: 12px; }
+.pager span { margin-right: auto; font-size: 0.86rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Per-key model editor. The summary is the current allowlist plus an Edit affordance;
+   the open panel is an inset sheet rather than browser-default details chrome. */
+.key-group { margin-top: 16px; }
+.key-group > summary { padding: 10px 0; font-weight: 600; }
+.key-group > summary::before { content: "▸ "; }
+.key-group[open] > summary::before { content: "▾ "; }
+summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+summary { list-style: none; cursor: pointer; padding: 0; }
+summary::-webkit-details-marker { display: none; }
+.editor summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.editor summary .edit { margin-left: 2px; font-size: 0.78rem; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.editor[open] summary .edit { color: var(--muted); }
+.chips { display: inline-flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.chips li { font-family: var(--mono); font-size: 0.78rem; padding: 1px 7px; border-radius: 3px; background: var(--glass); box-shadow: inset 0 0 0 1px var(--line); overflow-wrap: anywhere; }
+.editor .sheet { margin-top: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); }
+.choices { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 2px 12px; padding: 10px 12px; }
+.choices label { display: flex; align-items: center; gap: 8px; min-height: 30px; font-family: var(--mono); font-size: 0.82rem; cursor: pointer; overflow-wrap: anywhere; }
+.choices input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); flex-shrink: 0; }
+.choices .none { grid-column: 1 / -1; color: var(--muted); font-family: var(--sans); }
+.absent { margin: 0; padding: 6px 12px; border-top: 1px solid var(--line); font-size: 0.82rem; color: var(--warn); max-width: none; }
+button.primary.small { color: var(--paper); border-color: var(--ink); }
+.save-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); }
+
+/* Notes: the accounting caveats, collapsed by default and kept out of the reading line. */
+.notes { margin-top: calc(var(--pitch) * 1.5); padding-top: 10px; border-top: 1px solid var(--line); }
+.notes summary { display: inline-flex; align-items: center; gap: 8px; font-size: 0.86rem; color: var(--muted); }
+.notes summary::before { content: ""; width: 0; height: 0; border: 4px solid transparent; border-left: 6px solid currentColor; transition: transform 0.12s; }
+.notes[open] summary::before { transform: rotate(90deg); }
+.notes summary:hover { color: var(--ink); }
+.notes ul { margin: 8px 0 0; padding-left: 18px; font-size: 0.82rem; line-height: 1.55; color: var(--muted); max-width: var(--measure); }
+.notes li + li { margin-top: 3px; }
+.notes .ledger { margin: 12px 0 4px; }
+
+@media (max-width: 640px) {
+  .tabs { gap: 20px; }
+  .range .field input { width: 100%; }
+  .range .field { flex: 1 1 200px; }
+  .range .sep { display: none; }
+  .toolbar-actions { width: 100%; }
+  .toolbar-actions button { flex: 1 1 auto; }
+}
+</style>
+
+<header class="top">
+  <div class="brand">
+    <span class="eyebrow">powered by GliaCloud</span>
+    <h1>agent-model</h1>
+  </div>
+  <div class="who">
+    <span id="identity">Verifying your session…</span>
+    <a href="/portal/">My API key</a>
+    <div class="theme" role="group" aria-label="Color theme">
+      <button type="button" data-theme-choice="system" aria-pressed="true">Auto</button>
+      <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+      <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs" aria-label="Administration">
+  <a id="nav-overview" href="?tab=overview">Overview</a>
+  <a id="nav-users" href="?tab=users">Users</a>
+  <a id="nav-requests" href="?tab=requests">Requests</a>
+</nav>
+<main>
+  <section id="monitor-panel" class="card" aria-labelledby="monitor-title">
+    <div class="card-head">
+      <h2 id="monitor-title">Overview</h2>
+      <p id="mon-range" class="hint"></p>
+    </div>
+    <div class="toolbar">
+      <div class="range">
+        <label class="field"><span>From · Asia/Taipei (UTC+8)</span><input id="mon-since" type="datetime-local" step="1" aria-label="Since, Asia/Taipei UTC+8, inclusive"></label>
+        <span class="sep" aria-hidden="true">→</span>
+        <label class="field"><span>Until · Asia/Taipei (UTC+8)</span><input id="mon-until" type="datetime-local" step="1" aria-label="Until, Asia/Taipei UTC+8, exclusive"></label>
+      </div>
+      <div class="toolbar-actions">
+        <button type="button" id="mon-more" class="toggle" aria-expanded="false" aria-controls="mon-extra">Filters<span id="mon-count" class="count" hidden></span></button>
+        <button type="button" id="mon-apply" class="primary">Apply</button>
+        <button type="button" id="mon-reset" class="ghost">Reset</button>
+      </div>
+    </div>
+    <div id="mon-extra" class="filter-panel" hidden>
+      <label class="field"><span>Bucket</span><select id="mon-bucket"><option value="day">Taipei day</option><option value="hour">Taipei hour (≤31 days)</option></select></label>
+      <label class="field"><span>User</span><input id="mon-user" type="text" list="mon-user-options" placeholder="Any user" autocomplete="off"></label>
+      <label class="field"><span>Key ID</span><input id="mon-key" type="text" list="mon-key-options" placeholder="Any key" autocomplete="off"></label>
+      <datalist id="mon-user-options"></datalist>
+      <datalist id="mon-key-options"></datalist>
+      <label class="field"><span>Requested model</span><select id="mon-model"><option value="">All models</option></select></label>
+      <label class="field"><span>Provider</span><select id="mon-provider"><option value="">All providers</option></select></label>
+      <label class="field"><span>Billing route</span><select id="mon-auth"><option value="">All routes</option><option value="subscription">Subscription</option><option value="api_key">API key</option></select></label>
+      <label class="field"><span>Status</span><select id="mon-status"><option value="">All statuses</option><option value="ok">OK</option><option value="error">Error</option></select></label>
+    </div>
+    <ul id="mon-chips" class="applied" aria-label="Applied filters" hidden></ul>
+    <p id="mon-message" class="status" role="status" aria-live="polite">Loading monitoring…</p>
+    <div id="mon-results" hidden>
+      <dl id="mon-summary" class="ledger"></dl>
+      <div id="overview-charts">
+        <div class="chart-head"><h3 id="mon-trend-title">Requests per day · Asia/Taipei (UTC+8)</h3><span id="mon-trend-range" class="hint"></span></div>
+        <div class="chart">
+          <svg id="mon-trend" class="trend" viewBox="0 0 1000 150" preserveAspectRatio="none" role="img" aria-label="Requests per bucket, Asia/Taipei UTC+8"></svg>
+          <div id="mon-tip" class="tip" role="tooltip" hidden><b id="mon-tip-title"></b><dl id="mon-tip-rows"></dl></div>
+        </div>
+        <div class="axis"><span id="mon-axis-start"></span><span id="mon-axis-end"></span></div>
+        <p id="mon-trend-empty" class="empty" hidden>No retained records in this range.</p>
+        <div class="monitor-groups">
+          <div><h3>By requested model</h3><div class="scroll"><table><thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Tokens</th><th class="num">Errors</th></tr></thead><tbody id="mon-models"></tbody></table></div></div>
+          <div><h3>By user and key</h3><div class="scroll"><table><thead><tr><th>User</th><th class="num">Requests</th><th class="num">Tokens</th><th class="num">Errors</th></tr></thead><tbody id="mon-users"></tbody></table></div></div>
+        </div>
+      </div>
+      <div id="request-metadata" hidden>
+        <div class="scroll"><table class="requests"><thead><tr>
+          <th aria-sort="descending">Time ↓ · Asia/Taipei (UTC+8)</th><th>Request</th><th>User</th><th>Key</th><th>Model</th><th>Provider</th><th>Route</th><th>Status</th>
+          <th class="num">Prompt</th><th class="num">Completion</th><th class="num">Total</th><th class="num">Cache r / w</th><th class="num">Reasoning</th><th class="num">Latency</th><th>Cost</th>
+        </tr></thead><tbody id="mon-details"></tbody></table></div>
+        <div class="pager"><span id="mon-page"></span><button type="button" id="mon-prev" class="small">Previous</button><button type="button" id="mon-next" class="small">Next</button></div>
+      </div>
+      <details id="mon-advanced" class="notes"><summary>Detailed statistics</summary>
+        <dl id="mon-stats" class="ledger compact"></dl>
+        <ul>
+          <li>Cache tokens are part of prompt tokens. Reasoning tokens are reported separately and not added to totals.</li>
+          <li>Subscription requests are accounted at $0; that is not the invoice. Unpriced and unknown requests are not free.</li>
+          <li>Response-cache requests were served from cache, not from the upstream.</li>
+        </ul>
+      </details>
+    </div>
+    <details class="notes"><summary>About these numbers</summary>
+      <ul>
+        <li>Everything on this tab uses the same applied filters. Totals do not depend on pagination.</li>
+        <li>Retained managed-key logs and the current Master key, including earlier records for that same credential. Other config keys and unknown or unavailable rotated master credentials are excluded; no records does not prove no usage.</li>
+        <li>Master key is shared-credential usage, not attribution to an actual caller. It is read-only here. Requests show latest use first.</li>
+        <li>The default range is rolling 30 × 24 hours, not 30 calendar dates. The first and last buckets can be partial. The until bound is exclusive.</li>
+      </ul>
+    </details>
+  </section>
+  <section id="users-panel" class="card" aria-labelledby="overview-title" hidden>
+    <div class="card-head">
+      <h2 id="overview-title">Users</h2>
+      <div class="actions">
+        <input type="search" id="filter" placeholder="Filter by user, key ID or state" aria-label="Filter rows" autocomplete="off">
+        <button type="button" id="refresh">Refresh</button>
+      </div>
+    </div>
+    <div class="service-create">
+      <label class="field"><span>Service name</span><input id="service-name" type="text" maxlength="128" autocomplete="off" placeholder="e.g. build-worker"></label>
+      <button type="button" id="service-create" class="primary" disabled>Create Service API key</button>
+      <p class="hint">Starts with no models. Grant access below after creation.</p>
+    </div>
+    <div id="service-secret" class="service-secret" hidden>
+      <strong>Save this key now. It will not be shown again.</strong>
+      <pre id="service-token"></pre>
+      <div class="actions">
+        <button type="button" id="service-copy" class="primary">Copy key</button>
+        <button type="button" id="service-dismiss">Dismiss</button>
+      </div>
+    </div>
+    <p id="status" class="status" role="status" aria-live="polite">Loading…</p>
+    <dl class="ledger">
+      <div><dt>Rolling 30 × 24 hours · Asia/Taipei (UTC+8)</dt><dd id="window" class="text">—</dd></div>
+      <div><dt>Keys listed</dt><dd id="count">0</dd></div>
+      <div><dt>Requests</dt><dd id="requests">0</dd></div>
+      <div><dt>Prompt tokens</dt><dd id="prompt">0</dd></div>
+      <div><dt>Completion tokens</dt><dd id="completion">0</dd></div>
+      <div><dt>Total tokens</dt><dd id="total">0</dd></div>
+    </dl>
+    <div id="keys"></div>
+    <details class="notes"><summary>About keys</summary>
+      <ul>
+        <li>Employees create their key on the personal page; models are authorized here. New keys allow no models.</li>
+        <li>Service keys have no Google identity and allow only the same inference routes as employee keys. Rotate replaces the secret immediately, preserving name, history and permissions. Revoked replacements start with no models; a separate pause is preserved.</li>
+        <li>Model and state changes take effect on the key's next request. Disabling is reversible. Revocation permanently retires the secret while retaining history; revoked keys cannot be enabled or edited.</li>
+        <li>Usage is the rolling 30 × 24 hours, displayed in Asia/Taipei (UTC+8), from retained request logs, for the keys listed. Legacy and Master keys are read-only here; Master key represents only the current configured credential.</li>
+      </ul>
+    </details>
+  </section>
+</main>
+<script nonce="{{NONCE}}">
+'use strict';
+{{SHARED_JS}}
+let csrf = '';
+let monitorFilter = null;
+let monitorPage = 1;
+let monitorSequence = 0;
+// Keep only the current selector set, not reports/pages. Pagination must not reload it.
+let monitorOptionKey = '';
+let monitorOptionValues = null;
+let activeTab = 'overview';
+let signedIn = false;
+let usersLoaded = false;
+let usersLoading = null;
+let usersCatalog = [];
+let usersCount = 0;
+let usersRenderGeneration = 0;
+const keyGroups = new Map();
+let serviceCreating = false;
+let serviceRevealEpoch = 0;
+const TABS = ['overview','users','requests'];
+const monitorFields = ['since','until','bucket','user','key_id','model','provider','auth_mode','status'];
+const filterControls = [['mon-since','since'],['mon-until','until'],['mon-bucket','bucket'],['mon-user','user'],['mon-key','key_id'],['mon-model','model'],['mon-provider','provider'],['mon-auth','auth_mode'],['mon-status','status']];
+// Dimensions shown as chips and counted on the Filters button; the time range is always
+// visible. Only non-default values reach the URL, so every entry here is a real choice.
+const dimensionLabels = {user: 'User', key_id: 'Key', model: 'Model', provider: 'Provider', auth_mode: 'Route', status: 'Status', bucket: 'Bucket'};
+
+function routeURL(tab, filters = monitorFilter || {}, page = monitorPage) {
+  const query = new URLSearchParams({tab, ...filters});
+  if (page !== 1) query.set('page', String(page));
+  return '?' + query.toString();
+}
+function followLink(link) {
+  link.onclick = event => {
+    if (event && (event.button > 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) return;
+    if (event) event.preventDefault();
+    history.pushState(null, '', link.href);
+    return showRoute();
+  };
+}
+function requestURL(field, value) {
+  // Drilldowns replace the matching dimension, preserving the applied time range.
+  const filters = {...monitorFilter, [field]: value};
+  if (field === 'key_id') delete filters.user;
+  return routeURL('requests', filters, 1);
+}
+function requestLink(label, field, value) {
+  const link = document.createElement('a');
+  link.textContent = label;
+  link.href = requestURL(field, value);
+  followLink(link);
+  return link;
+}
+function syncRouteLinks() {
+  for (const tab of TABS) $('nav-' + tab).href = routeURL(tab);
+  // Users rows survive navigation to preserve editors; keep native new-tab hrefs current too.
+  for (const link of $('keys').querySelectorAll('a[data-key-id]')) {
+    link.href = requestURL('key_id', link.getAttribute('data-key-id'));
+  }
+}
+function setPanel(open) {
+  $('mon-extra').hidden = !open;
+  $('mon-more').setAttribute('aria-expanded', String(open));
+}
+function activeDimensions(filters) {
+  return Object.entries(filters || {}).filter(([k, v]) => v && dimensionLabels[k]);
+}
+function renderChips(filters) {
+  const dimensions = activeDimensions(filters);
+  const count = $('mon-count');
+  count.textContent = String(dimensions.length);
+  count.hidden = dimensions.length === 0;
+  const list = $('mon-chips');
+  list.replaceChildren();
+  list.hidden = dimensions.length === 0;
+  for (const [field, value] of dimensions) {
+    const item = document.createElement('li');
+    const label = document.createElement('b');
+    const code = document.createElement('code');
+    const remove = document.createElement('button');
+    label.textContent = dimensionLabels[field];
+    code.textContent = value;
+    remove.type = 'button';
+    remove.textContent = '×';
+    remove.setAttribute('aria-label', 'Remove ' + dimensionLabels[field] + ' filter');
+    remove.onclick = () => {
+      const next = {...filters};
+      delete next[field];
+      history.pushState(null, '', routeURL(activeTab, next, 1));
+      return showRoute();
+    };
+    item.append(label, code, remove);
+    list.append(item);
+  }
+}
+async function showRoute() {
+  const query = new URLSearchParams(location.search);
+  const previousTab = activeTab;
+  clearServiceSecret();
+  activeTab = TABS.includes(query.get('tab')) ? query.get('tab') : 'overview';
+  $('users-panel').hidden = activeTab !== 'users';
+  $('monitor-panel').hidden = activeTab === 'users';
+  $('overview-charts').hidden = activeTab !== 'overview';
+  $('request-metadata').hidden = activeTab !== 'requests';
+  $('mon-summary').hidden = activeTab !== 'overview';
+  $('monitor-title').textContent = activeTab === 'requests' ? 'Requests' : 'Overview';
+  for (const tab of TABS) {
+    const link = $('nav-' + tab);
+    if (tab === activeTab) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
+  // Keep raw URL values for backend validation, including invalid dates/pages.
+  monitorFilter = Object.fromEntries(monitorFields.filter(k => query.has(k)).map(k => [k, query.get(k)]));
+  monitorPage = query.has('page') ? query.get('page') : 1;
+  for (const [id, field] of filterControls) {
+    const value = monitorFilter[field] || (field === 'bucket' ? 'day' : '');
+    if (['since','until'].includes(field)) $(id).value = taipeiInput(value);
+    else {
+      if (value && ['mon-model','mon-provider'].includes(id)) monitorOptions(id, [[value,value]], 'All');
+      $(id).value = value;
+    }
+  }
+  renderChips(monitorFilter);
+  // The panel opens when landing on Requests or when a dimension is in effect; paging
+  // and re-applying leave whatever the administrator chose.
+  if (previousTab !== activeTab || !signedIn) setPanel(activeTab === 'requests' || activeDimensions(monitorFilter).length > 0);
+  // Do not let a monitoring response overwrite navigation that happened while it was pending.
+  monitorSequence++;
+  syncRouteLinks();
+  if (!signedIn) return;
+  if (activeTab === 'users') {
+    if (!usersLoaded) {
+      try {
+        if (!usersLoading) usersLoading = overview().then(() => { usersLoaded = true; }).finally(() => { usersLoading = null; });
+        await usersLoading;
+        $('service-create').disabled = false;
+        setStatus('');
+      }
+      catch (e) { setStatus(e.message, 'error'); }
+    }
+  } else await loadMonitoring();
+}
+Object.assign(ERRORS, {
+  invalid_service_name: 'Use a service name of 1–128 bytes, without control characters.',
+  service_name_conflict: 'That name is already in use (including disabled and revoked keys). Refresh the list; existing keys were not changed.',
+  admin_required: 'Your account is not an administrator.',
+  invalid_monitoring_filter: 'Check the Taipei (UTC+8) dates (past, at most 366 days; hourly at most 31 days) and filter values.',
+  invalid_model: 'A selected model is no longer in the gateway catalog. Refresh and reselect.',
+  key_unavailable: 'That key is revoked, missing, or not managed by Portal. Refresh the list.'
+});
+// The Users tab and the monitoring tabs each have their own status line.
+const setStatus = (message, tone) => announce('status', message, tone);
+const setMessage = (message, tone) => announce('mon-message', message, tone);
+
+/* Kind and state strings come from GetPortalOverview's SQL; unknown values fall back to neutral. */
+const MASTER_KEY_ID = 'system:master';
+const KINDS = {master: ['Master key', 'warn'], service: ['Service', 'ok'], portal: ['Portal', 'ok'], legacy_current_hash: ['Legacy', 'neutral']};
+const STATES = {active: ['active', 'ok'], disabled: ['disabled', 'warn'], expired: ['expired', 'warn'], revoked: ['revoked', 'danger']};
+const STATUSES = {ok: ['ok', 'ok'], error: ['error', 'danger']};
+const ROUTES = {subscription: ['sub', 'neutral'], api_key: ['api', 'neutral']};
+function badge(map, value) {
+  const [label, tone] = map[value] || [value, 'neutral'];
+  const span = document.createElement('span');
+  span.className = 'badge ' + tone;
+  span.textContent = label;
+  return span;
+}
+function cell(className, content, sub) {
+  const td = document.createElement('td');
+  if (className) td.className = className;
+  if (typeof content === 'number') setFigure(td, content);
+  else if (typeof content === 'string') td.textContent = content;
+  else if (content) td.append(content);
+  if (sub) {
+    const line = document.createElement('span');
+    line.className = 'sub' + (sub.mono ? ' mono' : '');
+    line.textContent = sub.text;
+    td.append(line);
+  }
+  return td;
+}
+function chips(models) {
+  const list = document.createElement('ul');
+  list.className = 'chips';
+  for (const model of models) {
+    const item = document.createElement('li');
+    item.textContent = model;
+    list.append(item);
+  }
+  return list;
+}
+
+/* One editable allowlist per portal key. Saving replaces the cell with the server's answer,
+   so the summary never shows a selection the gateway did not confirm. */
+function modelControls(k, catalog) {
+  const td = document.createElement('td');
+  td.className = 'models';
+  if (k.key_id === MASTER_KEY_ID || k.kind === 'master') { td.textContent = 'Read-only · configured outside Portal'; td.classList.add('muted'); return td; }
+  if (!['portal', 'service'].includes(k.kind)) { td.textContent = 'Unmanaged legacy key'; td.classList.add('muted'); return td; }
+  if (k.state === 'revoked') { td.textContent = 'Revoked — not editable'; td.classList.add('muted'); return td; }
+  const details = document.createElement('details');
+  const summary = document.createElement('summary');
+  const sheet = document.createElement('div');
+  const choices = document.createElement('div');
+  const saveRow = document.createElement('div');
+  const save = document.createElement('button');
+  const edit = document.createElement('span');
+  const selected = k.models || [];
+  details.className = 'editor';
+  if (selected.length) summary.append(chips(selected));
+  else {
+    const none = document.createElement('span');
+    none.className = 'muted';
+    none.textContent = 'No models · inference denied';
+    summary.append(none);
+  }
+  edit.className = 'edit';
+  edit.textContent = 'Edit';
+  summary.append(edit);
+  details.append(summary);
+  sheet.className = 'sheet';
+  choices.className = 'choices';
+  // The checkbox list is built on first open: most rows stay closed, and a
+  // closed row's list would otherwise be N keys x M models of idle DOM.
+  const populate = () => {
+    if (choices.children.length) return;
+    if (!catalog.length) {
+      const none = document.createElement('span');
+      none.className = 'none';
+      none.textContent = 'The gateway catalog is empty; nothing can be granted.';
+      choices.append(none);
+    }
+    for (const model of catalog) {
+      const label = document.createElement('label');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = model;
+      input.checked = selected.includes(model);
+      label.append(input, document.createTextNode(model));
+      choices.append(label);
+    }
+  };
+  details.ontoggle = () => { if (details.open) populate(); };
+  sheet.append(choices);
+  const absent = selected.filter(m => !catalog.includes(m));
+  if (absent.length) {
+    const note = document.createElement('p');
+    note.className = 'absent';
+    note.textContent = 'No longer in gateway catalog (dropped on save): ' + absent.join(', ');
+    sheet.append(note);
+  }
+  save.type = 'button';
+  save.className = 'primary small';
+  save.textContent = 'Save models';
+  save.onclick = async () => {
+    const models = Array.from(choices.querySelectorAll('input:checked'), i => i.value);
+    if (!confirm('Set allowed models for ' + k.name + ' to ' + (models.length ? models.join(', ') : 'none (deny inference)') + '?')) return;
+    save.disabled = true;
+    choices.querySelectorAll('input').forEach(i => { i.disabled = true; });
+    try {
+      const d = await api('/portal/admin/api/models', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+        body: JSON.stringify({key_id: k.key_id, models, ...(k.kind === 'service' ? {revision: k.revision} : {})})
+      });
+      td.replaceWith(modelControls({...k, models: d.models}, catalog));
+      setStatus('Models saved for ' + k.name + '.', 'ok');
+    } catch (e) {
+      setStatus(e.message + ' Refresh to confirm the current selection before retrying.', 'error');
+      save.disabled = false;
+      choices.querySelectorAll('input').forEach(i => { i.disabled = false; });
+    }
+  };
+  saveRow.className = 'save-row';
+  saveRow.append(save);
+  sheet.append(saveRow);
+  details.append(sheet);
+  td.append(details);
+  return td;
+}
+
+const searchKey = k => (k.name + ' ' + k.key_id + ' ' + k.state + ' ' + k.kind).toLowerCase();
+function stateControls(k) {
+  const generation = usersRenderGeneration;
+  const td = cell('', badge(STATES, k.state));
+  if (k.revoked_at) {
+    const time = document.createElement('span'); time.className = 'sub';
+    time.textContent = 'Revoked ' + stamp(k.revoked_at) + ' ' + PORTAL_TIME_LABEL;
+    td.append(time);
+  }
+  if (k.key_id === MASTER_KEY_ID || !['portal', 'service'].includes(k.kind) || !['active', 'disabled', 'expired'].includes(k.state)) return td;
+  const buttons = [];
+  const addAction = (label, action) => {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'small'; button.textContent = label;
+    buttons.push(button);
+    button.onclick = async () => {
+      const revoke = action === 'revoke';
+      const message = revoke
+        ? 'Permanently revoke ' + k.name + '? This credential cannot be restored. Historical requests and costs will be preserved. A replacement needs a new secret and new model grants.'
+        : label + ' ' + k.name + '? Model permissions and history will be preserved.';
+      if (!confirm(message)) return;
+      buttons.forEach(b => { b.disabled = true; });
+      try {
+        const d = await api('/portal/admin/api/' + (revoke ? 'revoke' : 'state'), {
+          method: revoke ? 'POST' : 'PUT', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+          body: JSON.stringify(revoke ? {key_id: k.key_id} : {key_id: k.key_id, disabled: action === 'disable'})
+        });
+        // Refresh replaced these rows while the mutation was pending. Its old
+        // response must not reattach a detached row or overwrite current status.
+        if (generation !== usersRenderGeneration) return;
+        // Refresh only this row, not other administrators' unsaved grant editors.
+        const next = {...k, state: d.state || (d.disabled ? 'disabled' : 'active'), revoked_at: d.revoked_at, models: revoke ? (d.models || []) : k.models};
+        const row = td.closest('tr');
+        if (row && row.retired) return;
+        if (row) {
+          row.setAttribute('data-search', searchKey(next));
+          td.replaceWith(stateControls(next));
+          if (revoke || next.state === 'revoked') row.children[4].replaceWith(modelControls(next, usersCatalog));
+          row.remove(); appendKey(next, usersCatalog, row); updateKeyGroups();
+        }
+        applyFilter();
+        setStatus(label + ' completed for ' + k.name + '. Effective on the next request.', 'ok');
+      } catch (e) {
+        if (generation !== usersRenderGeneration) return;
+        buttons.forEach(b => { b.disabled = false; });
+        setStatus(e.message + ' Refresh to confirm key state.', 'error');
+      }
+    };
+    td.append(document.createTextNode(' '), button);
+  };
+  if (k.state !== 'expired') addAction(k.state === 'disabled' ? 'Enable' : 'Disable', k.state === 'disabled' ? 'enable' : 'disable');
+  addAction('Revoke permanently', 'revoke');
+  return td;
+}
+
+// Native details provides keyboard disclosure without a second state controller.
+// Only inactive groups collapse; retained request links always remain available.
+function appendKey(k, catalog, existingRow) {
+  const kind = ['portal', 'service', 'master'].includes(k.kind) ? k.kind : 'legacy_current_hash';
+  const state = k.state === 'revoked' ? 'revoked' : ['disabled', 'expired'].includes(k.state) ? 'inactive' : 'active';
+  const id = kind + ':' + state;
+  if (!keyGroups.has(id)) {
+    const group = document.createElement('details');
+    group.className = 'key-group'; group.open = state === 'active';
+    const summary = document.createElement('summary');
+    const scroll = document.createElement('div'); scroll.className = 'scroll';
+    const table = document.createElement('table'); table.className = 'keys';
+    const head = document.createElement('thead'), row = document.createElement('tr');
+    for (const label of ['User / service', 'Key ID', 'Kind', 'State', 'Allowed models', 'Requests', 'Prompt', 'Completion', 'Total']) {
+      const th = document.createElement('th'); th.scope = 'col'; th.textContent = label; if (row.children.length >= 5) th.className = 'num'; row.append(th);
+    }
+    head.append(row);
+    const body = document.createElement('tbody'); table.append(head, body); scroll.append(table);
+    group.append(summary, scroll); $('keys').append(group);
+    keyGroups.set(id, {group, summary, body, label: KINDS[kind][0] + ' · ' + ({active: 'Active', inactive: 'Disabled / expired', revoked: 'Revoked'})[state]});
+  }
+  keyGroups.get(id).body.append(existingRow || renderRow(k, catalog));
+}
+function updateKeyGroups() {
+  for (const kind of ['portal', 'service', 'master', 'legacy_current_hash']) {
+    for (const state of ['active', 'inactive', 'revoked']) {
+      const entry = keyGroups.get(kind + ':' + state);
+      if (entry) $('keys').append(entry.group);
+    }
+  }
+  for (const {group, summary, body, label} of keyGroups.values()) {
+    group.hidden = body.children.length === 0;
+    summary.textContent = label + ' (' + body.children.length + ')';
+  }
+}
+
+function renderRow(k, catalog) {
+  const tr = document.createElement('tr');
+  tr.setAttribute('data-search', searchKey(k));
+  const id = cell('mono', k.key_id);
+  id.title = k.key_id;
+  const person = cell('name', k.name);
+ if (k.kind !== 'master') person.append(historyControls(k));
+  const requests = requestLink('View requests', 'key_id', k.key_id);
+  requests.setAttribute('data-key-id', k.key_id);
+  person.append(document.createElement('br'), requests);
+ if (k.kind === 'service') person.append(document.createElement('br'), serviceRotateControl(k));
+  tr.append(person, id, cell('', badge(KINDS, k.kind)), stateControls(k), modelControls(k, catalog));
+  for (const n of ['request_count', 'prompt_tokens', 'completion_tokens', 'total_tokens']) tr.append(cell('num', Number(k.stats[n] || 0)));
+  return tr;
+}
+function formatWindow(d) {
+  return stamp(d.since) + ' → ' + stamp(d.until);
+}
+function renderOverview(d, catalog) {
+  usersRenderGeneration++;
+  usersCatalog = catalog;
+  usersCount = d.keys.length;
+  $('window').textContent = formatWindow(d);
+  $('count').textContent = number(d.keys.length);
+  setFigure($('requests'), d.stats.request_count);
+  setFigure($('prompt'), d.stats.prompt_tokens);
+  setFigure($('completion'), d.stats.completion_tokens);
+  setFigure($('total'), d.stats.total_tokens);
+  const body = $('keys');
+  body.replaceChildren();
+  keyGroups.clear();
+  for (const k of d.keys) appendKey(k, catalog);
+  updateKeyGroups();
+  if (!d.keys.length) { const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = 'No issued keys yet.'; body.append(empty); }
+  applyFilter();
+}
+function applyFilter() {
+  const needle = ($('filter').value || '').trim().toLowerCase();
+  for (const {group, summary, body, label} of keyGroups.values()) {
+    let visible = 0;
+    for (const row of body.children) {
+      row.hidden = needle !== '' && !row.getAttribute('data-search').includes(needle);
+      if (!row.hidden) visible++;
+    }
+    group.hidden = visible === 0;
+    summary.textContent = label + ' (' + (needle ? visible + '/' : '') + body.children.length + ')';
+    if (needle && visible) group.open = true;
+  }
+}
+async function overview() {
+  const [d, m] = await Promise.all([api('/portal/admin/api/overview'), api('/portal/admin/api/models')]);
+  renderOverview(d, m.catalog || []);
+}
+// The secret lives only in this text node. Rows receive the public projection,
+// never the creation response, so editor closures cannot retain the credential.
+function clearServiceSecret() {
+  serviceRevealEpoch++;
+  $('service-token').textContent = '';
+  $('service-secret').hidden = true;
+}
+async function createServiceKey() {
+  if (serviceCreating || !signedIn || !usersLoaded) return;
+  if (!$('service-secret').hidden && !confirm('Dismiss the previous one-time key and create another?')) return;
+  serviceCreating = true;
+  $('service-create').disabled = true;
+  $('refresh').disabled = true;
+  clearServiceSecret();
+  const revealEpoch = serviceRevealEpoch;
+  setStatus('Creating service key…');
+  try {
+    const d = await api('/portal/admin/api/service-keys', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+      body: JSON.stringify({name: $('service-name').value})
+    });
+    const revealed = revealEpoch === serviceRevealEpoch && activeTab === 'users';
+    if (revealed) {
+      $('service-token').textContent = d.key;
+      $('service-secret').hidden = false;
+    }
+    d.key = ''; // Never pass the one-time credential to a row/editor closure.
+    // Append rather than refresh: all other unsaved model selections survive.
+    const body = $('keys');
+    if (!usersCount) body.replaceChildren();
+    appendKey(d, usersCatalog);
+    updateKeyGroups();
+    $('count').textContent = number(++usersCount);
+    $('filter').value = '';
+    applyFilter();
+    $('service-name').value = '';
+    setStatus(revealed ? 'Service key created with no models. Save the key now, then grant models below.' : 'Service key created, but navigation dismissed its one-time secret. Rotate it again to obtain a new secret.', revealed ? 'ok' : 'error');
+  } catch (e) {
+    setStatus(e.message + ' Refresh before trying again: an interrupted response may still have created the key. A lost secret cannot be revealed; rotate that key again.', 'error');
+  } finally {
+    serviceCreating = false;
+    $('service-create').disabled = false;
+    $('refresh').disabled = false;
+  }
+}
+// History is fetched on demand and rendered as text, never HTML. It is scoped
+// to the immutable logical key ID rather than a mutable name or secret hash.
+function historyControls(k) {
+  const details = document.createElement('details');
+  const summary = document.createElement('summary'); summary.textContent = 'Management history';
+  const entries = document.createElement('ol');
+  const load = document.createElement('button'); load.type = 'button'; load.className = 'small'; load.textContent = 'Load history';
+  const note = document.createElement('p'); note.className = 'hint';
+  let before = 0;
+  load.onclick = async () => {
+    load.disabled = true;
+    try {
+      const query = new URLSearchParams({key_id: k.key_id, before: String(before)});
+      const d = await api('/portal/admin/api/history?' + query.toString());
+      for (const event of d.events) {
+        const item = document.createElement('li');
+        item.textContent = stamp(event.created_at) + ' ' + PORTAL_TIME_LABEL + ' · ' + event.action + ' · ' + event.actor.kind + ' / ' + event.actor.id;
+        entries.append(item);
+      }
+      if (d.events.length) before = d.events[d.events.length - 1].id;
+      load.hidden = d.events.length < 100;
+      load.textContent = 'Older events';
+      note.textContent = entries.children.length ? 'Opaque actor IDs identify authenticated principals, not emails. Master is a shared credential.' : 'No recorded management events. History starts with this release.';
+    } catch (e) { note.textContent = e.message; }
+    finally { load.disabled = false; }
+  };
+  details.append(summary, entries, load, note);
+  return details;
+}
+function serviceRotateControl(k) {
+  const generation = usersRenderGeneration;
+  const button = document.createElement('button'); button.type = 'button'; button.className = 'small'; button.textContent = 'Rotate secret';
+  button.onclick = async () => {
+    if (serviceCreating) return;
+    if (!confirm('Replace the secret for ' + k.name + '? The old secret stops working immediately. Permissions are preserved unless currently revoked: then the replacement starts with no models. A disabled pause remains. Save the new secret now; it is shown only once.')) return;
+    if (!$('service-secret').hidden && !confirm('Dismiss the previous one-time secret?')) return;
+    serviceCreating = true; button.disabled = true; $('service-create').disabled = true;
+    clearServiceSecret(); const epoch = serviceRevealEpoch;
+    try {
+      const d = await api('/portal/admin/api/service-keys/rotate', {
+        method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+        body: JSON.stringify({key_id: k.key_id, revision: k.revision})
+      });
+      const revealed = epoch === serviceRevealEpoch && activeTab === 'users';
+      if (revealed) { $('service-token').textContent = d.key; $('service-secret').hidden = false; }
+      d.key = ''; // Keep the secret out of rows, editors and history closures.
+      if (generation === usersRenderGeneration) {
+        const row = button.closest('tr');
+        if (row) { row.retired = true; row.remove(); appendKey({...k, ...d, stats: k.stats}, usersCatalog); updateKeyGroups(); applyFilter(); }
+      } else {
+        // A refresh may have read the old revision while rotation was in flight.
+        usersLoaded = false;
+      }
+      setStatus(revealed ? 'Secret replaced for ' + k.name + '. Save it now. Refresh to confirm current state.' : 'Secret replaced, but navigation dismissed its one-time value. Refresh, then rotate again.', revealed ? 'ok' : 'error');
+    } catch (e) { setStatus(e.message + ' Refresh before retrying. A lost response may still have replaced the secret.', 'error'); }
+    finally { serviceCreating = false; button.disabled = false; $('service-create').disabled = !usersLoaded; }
+  };
+  return button;
+}
+
+function monitorOptions(id, options, label) {
+  const select = $(id), selected = select.value;
+  select.replaceChildren();
+  for (const [value, text] of [['', label], ...options]) {
+    const option = document.createElement('option'); option.value = value; option.textContent = text; select.append(option);
+  }
+  if (selected && !options.some(o => o[0] === selected)) {
+    const option = document.createElement('option'); option.value = selected; option.textContent = selected; select.append(option);
+  }
+  select.value = selected;
+}
+// Only explicit choices reach the URL; the gateway supplies the defaults (day buckets,
+// rolling 30 days, 25 per page), so a default never shows up as an applied filter.
+function monitorQuery() {
+  const f = {};
+  for (const [id, name] of filterControls) {
+    const value = $(id).value;
+    if (!value || (name === 'bucket' && value === 'day')) continue;
+    f[name] = ['since', 'until'].includes(name) ? taipeiInstant(value) : value;
+  }
+  // A master suggestion selects its reserved identity, never a possibly shared name.
+  if (f.user === MASTER_KEY_ID) { f.key_id = MASTER_KEY_ID; delete f.user; }
+  return f;
+}
+/* Chart tooltip. Without a hovering pointer (touch), a tap opens it and a tap elsewhere
+   closes it, so a finger scrolling across the bars never triggers it. */
+function showTip(rect, bucket, size) {
+  const s = bucket.stats, tip = $('mon-tip'), rows = $('mon-tip-rows');
+  const start = stamp(bucket.start);
+  $('mon-tip-title').textContent = (size === 'hour' ? start : start.slice(0, 10)) + ' ' + PORTAL_TIME_LABEL;
+  rows.replaceChildren();
+  for (const [label, value] of [
+    ['Requests', number(s.request_count)],
+    ['Errors', number(s.error_count) + (s.request_count ? ' (' + (100 * s.error_count / s.request_count).toFixed(1) + '%)' : '')],
+    ['Total tokens', number(s.total_tokens)],
+    ['API computed', '$' + Number(s.priced_cost_usd || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})]
+  ]) {
+    const dt = document.createElement('dt'), dd = document.createElement('dd');
+    dt.textContent = label; dd.textContent = value; rows.append(dt, dd);
+  }
+  placeTip(tip, rect, 100);
+}
+function hideTip() { $('mon-tip').hidden = true; }
+function ledgerEntry(list, label, value) {
+  const div = document.createElement('div'), dt = document.createElement('dt'), dd = document.createElement('dd');
+  dt.textContent = label;
+  if (typeof value === 'number') setFigure(dd, value); else dd.textContent = value;
+  div.append(dt, dd); list.append(div);
+}
+function emptyRow(body, span, text) {
+  const row = document.createElement('tr'), td = cell('', text);
+  row.className = 'empty-row'; td.colSpan = span; row.append(td); body.append(row);
+}
+const latency = value => value == null ? '—' : number(Math.round(value)) + ' ms';
+const usd = value => { const n = Number(value || 0), digits = n >= 1 ? 2 : 4; return '$' + n.toLocaleString('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits}); };
+function renderMonitorSummary(d) {
+  const s = d.stats;
+  const summary = $('mon-summary'); summary.replaceChildren();
+  ledgerEntry(summary, 'Requests', Number(s.request_count || 0));
+  ledgerEntry(summary, 'Total tokens', Number(s.total_tokens || 0));
+  ledgerEntry(summary, 'Success rate', s.request_count ? (100*(s.request_count-(s.error_count || 0))/s.request_count).toFixed(1) + '%' : '—');
+  ledgerEntry(summary, 'API computed cost', usd(s.priced_cost_usd));
+  ledgerEntry(summary, 'Latency p95', latency(d.p95_latency_ms));
+  const stats = $('mon-stats'); stats.replaceChildren();
+  for (const [label, value] of [
+    ['Requests', number(s.request_count)],
+    ['Prompt / completion', number(s.prompt_tokens) + ' / ' + number(s.completion_tokens)],
+    ['Total tokens', number(s.total_tokens)],
+    ['Errors', number(s.error_count) + ' (' + (s.request_count ? (100*s.error_count/s.request_count).toFixed(1) : '0') + '%)'],
+    ['Cache read / write', number(s.cache_read_tokens) + ' / ' + number(s.cache_creation_tokens)],
+    ['Reasoning reported', number(s.reasoning_tokens) + ' · ' + number(s.reasoning_known_requests) + ' of ' + number(s.request_count) + ' known'],
+    ['Latency mean / p95', latency(s.mean_latency_ms) + ' / ' + latency(d.p95_latency_ms)],
+    ['API computed', usd(s.priced_cost_usd) + ' · ' + number(s.priced_requests) + ' requests'],
+    ['Subscription accounting', '$0 · ' + number(s.subscription_requests) + ' requests'],
+    ['Unpriced / unknown', number(s.unpriced_requests) + ' / ' + number(s.unknown_cost_requests)],
+    ['Response cache', number(s.response_cache_requests) + ' requests']
+  ]) ledgerEntry(stats, label, value);
+
+  const svg = $('mon-trend'); svg.replaceChildren();
+  const hasBuckets = d.buckets.length > 0;
+  svg.hidden = !hasBuckets;
+  $('mon-trend-empty').hidden = hasBuckets;
+  $('mon-trend-title').textContent = 'Requests per ' + (d.filter.bucket === 'hour' ? 'hour' : 'day') + ' · ' + PORTAL_TIME_LABEL;
+  hideTip();
+  const max = Math.max(1, ...d.buckets.map(b => b.stats.request_count)), width = 1000 / Math.max(1, d.buckets.length);
+  d.buckets.forEach((b, i) => {
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    const height = 140 * b.stats.request_count / max;
+    for (const [name, value] of [['x', i * width + 1], ['y', 145 - height], ['width', Math.max(.5, width - 2)], ['height', height]]) rect.setAttribute(name, value);
+    if (HOVERABLE) { rect.onmouseenter = () => showTip(rect, b, d.filter.bucket); rect.onmouseleave = hideTip; }
+    else rect.onclick = () => showTip(rect, b, d.filter.bucket);
+    svg.append(rect);
+  });
+  const baseline = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  for (const [name, value] of [['x1', 0], ['x2', 1000], ['y1', 145.5], ['y2', 145.5], ['class', 'baseline']]) baseline.setAttribute(name, value);
+  svg.append(baseline);
+  $('mon-axis-start').textContent = hasBuckets ? stamp(d.buckets[0].start) : '';
+  $('mon-axis-end').textContent = hasBuckets ? stamp(d.buckets[d.buckets.length - 1].start) : '';
+  $('mon-trend-range').textContent = hasBuckets ? 'peak ' + number(s.request_count ? max : 0) + ' requests' : '';
+
+  for (const [id, groups] of [['mon-models', d.models], ['mon-users', d.users]]) {
+    const body = $(id); body.replaceChildren();
+    for (const g of groups) {
+      const row = document.createElement('tr');
+      const name = cell('', requestLink(g.name, id === 'mon-models' ? 'model' : 'key_id', g.id), g.id !== g.name ? {text: g.id, mono: true} : null);
+      if (id === 'mon-users' && g.id === MASTER_KEY_ID) name.append(document.createTextNode(' '), badge(KINDS, 'master'));
+      row.append(name, cell('num', Number(g.stats.request_count || 0)), cell('num', Number(g.stats.total_tokens || 0)), cell('num', Number(g.stats.error_count || 0)));
+      body.append(row);
+    }
+    if (!groups.length) emptyRow(body, 4, 'No matching retained records.');
+  }
+}
+function renderMonitorRequests(d) {
+  const details = $('mon-details'); details.replaceChildren();
+  for (const r of d.requests) {
+    const row = document.createElement('tr');
+    const time = stamp(r.created_at);
+    let used = null;
+    if (!r.model_used) used = {text: 'not served'};
+    else if (r.model_used !== r.model) used = {text: '→ ' + r.model_used, mono: true};
+    row.append(
+      cell('mono', time.slice(0, 10), {text: time.slice(11), mono: true}),
+      cell('mono', r.id),
+      cell('', r.user),
+      cell('mono', r.key_id),
+      cell('mono', r.model, used),
+      cell('', r.provider),
+      cell('', badge(ROUTES, r.auth_mode)),
+      cell('', badge(STATUSES, r.status)),
+      cell('num', Number(r.prompt_tokens || 0)),
+      cell('num', Number(r.completion_tokens || 0)),
+      cell('num', Number(r.total_tokens || 0)),
+      cell('num', number(r.cache_read_tokens) + ' / ' + number(r.cache_creation_tokens)),
+      cell('num', r.reasoning_tokens == null ? '—' : number(r.reasoning_tokens)),
+      cell('num', latency(r.latency_ms)),
+      cell('', r.priced_cost_usd == null ? r.cost_class : usd(r.priced_cost_usd), r.priced_cost_usd == null ? null : {text: r.cost_class})
+    );
+    details.append(row);
+  }
+  if (!d.requests.length) emptyRow(details, 15, 'No requests match these filters.');
+  const pages = Math.max(1, Math.ceil(d.request_count / d.filter.page_size));
+  $('mon-page').textContent = 'Page ' + number(d.filter.page) + ' of ' + number(pages) + ' · ' + number(d.request_count) + ' requests';
+  $('mon-prev').disabled = d.filter.page <= 1;
+  $('mon-next').disabled = d.filter.page * d.filter.page_size >= d.request_count;
+}
+function renderMonitorOptions(options) {
+  for (const [id, values] of [['mon-user-options', options.users.map(u => u.id === MASTER_KEY_ID ? MASTER_KEY_ID : u.name)], ['mon-key-options', options.users.map(u => u.id)]]) {
+    const list = $(id); list.replaceChildren();
+    for (const value of [...new Set(values)].sort()) { const option = document.createElement('option'); option.value = value; if (value === MASTER_KEY_ID) option.textContent = 'Master key'; list.append(option); }
+  }
+  monitorOptions('mon-model', options.models.map(v => [v, v]), 'All models');
+  monitorOptions('mon-provider', options.providers.map(v => [v, v]), 'All providers');
+}
+function renderMonitoring(d) {
+  $('mon-range').textContent = formatWindow(d.filter) + ' ' + PORTAL_TIME_LABEL;
+  if (d.stats) renderMonitorSummary(d);
+  if (d.requests) renderMonitorRequests(d);
+  if (d.options) renderMonitorOptions(d.options);
+  $('mon-results').hidden = false;
+}
+function monitorOptionsKey(filter) {
+  // Owner suggestions follow dimension filters; model/provider choices span the range.
+  return JSON.stringify(monitorFields.filter(k => k !== 'bucket').map(k => filter[k] || ''));
+}
+// Always called after showRoute has taken the filter from the URL; the URL is the only
+// source of applied filters.
+async function loadMonitoring() {
+  const seq = ++monitorSequence;
+  $('mon-results').hidden = true;
+  setMessage('Loading monitoring…');
+  for (const id of ['mon-apply','mon-reset','mon-prev','mon-next']) $(id).disabled = true;
+  try {
+    const view = activeTab === 'requests' ? 'requests' : 'summary';
+    const query = new URLSearchParams({...monitorFilter, page: String(monitorPage), view, timezone: PORTAL_TIMEZONE});
+    const d = await api('/portal/admin/api/monitoring?' + query.toString());
+    if (seq !== monitorSequence) return;
+    const optionKey = monitorOptionsKey(d.filter);
+    let options = d.options;
+    if (view === 'requests') {
+      options = optionKey === monitorOptionKey ? monitorOptionValues : null;
+      if (!options) {
+        query.set('since', d.filter.since);
+        query.set('until', d.filter.until);
+        query.set('view', 'options');
+        const selectors = await api('/portal/admin/api/monitoring?' + query.toString());
+        if (seq !== monitorSequence) return;
+        options = selectors.options;
+      }
+    }
+    monitorOptionKey = optionKey;
+    monitorOptionValues = options;
+    // Freeze the server-resolved rolling range for subsequent pages.
+    monitorFilter = {...monitorFilter, since: d.filter.since, until: d.filter.until};
+    history.replaceState(null, '', routeURL(activeTab));
+    syncRouteLinks();
+    renderMonitoring(d);
+    if (view === 'requests') renderMonitorOptions(options);
+    $('mon-since').value = taipeiInput(d.filter.since);
+    $('mon-until').value = taipeiInput(d.filter.until);
+    renderChips(monitorFilter);
+    setMessage('');
+  } catch (e) {
+    if (seq === monitorSequence) setMessage(e.message, 'error');
+  } finally {
+    if (seq === monitorSequence) { $('mon-apply').disabled = false; $('mon-reset').disabled = false; }
+  }
+}
+function init() {
+  initTheme();
+  $('service-create').onclick = createServiceKey;
+  $('service-dismiss').onclick = clearServiceSecret;
+  $('service-copy').onclick = () => copyText($('service-copy'), $('service-token').textContent);
+  window.addEventListener('pagehide', clearServiceSecret);
+  for (const tab of TABS) followLink($('nav-' + tab));
+  window.addEventListener('popstate', () => showRoute());
+  showRoute();
+  $('mon-more').onclick = () => setPanel($('mon-extra').hidden);
+  if (!HOVERABLE) document.addEventListener('click', event => { if (!event.target.closest('#mon-trend')) hideTip(); });
+  const applyMonitoring = () => {
+    try {
+      const filters = monitorQuery();
+      monitorOptionKey = ''; // Apply/Reset explicitly refresh selector choices too.
+      monitorOptionValues = null;
+      history.pushState(null, '', routeURL(activeTab, filters, 1));
+      return showRoute();
+    } catch (e) { setMessage(e.message, 'error'); }
+  };
+  $('mon-apply').onclick = applyMonitoring;
+  // Reset clears every control; the gateway then answers with its rolling 30-day default.
+  $('mon-reset').onclick = () => {
+    for (const [id, name] of filterControls) $(id).value = name === 'bucket' ? 'day' : '';
+    return applyMonitoring();
+  };
+  for (const id of ['mon-user','mon-key']) $(id).onkeydown = event => { if (event.key === 'Enter') applyMonitoring(); };
+  const turnPage = delta => {
+    history.pushState(null, '', routeURL(activeTab, monitorFilter, Number(monitorPage) + delta));
+    return showRoute();
+  };
+  $('mon-prev').onclick = () => turnPage(-1);
+  $('mon-next').onclick = () => turnPage(1);
+  $('filter').oninput = applyFilter;
+  $('refresh').onclick = async () => {
+    if (!confirm('Refresh usage and discard any unsaved model selections?')) return;
+    $('refresh').disabled = true;
+    $('service-create').disabled = true;
+    try {
+      await overview();
+      usersLoaded = true;
+      setStatus('Usage and models refreshed.', 'ok');
+    } catch (e) {
+      setStatus(e.message, 'error');
+    } finally {
+      $('refresh').disabled = false;
+      $('service-create').disabled = !usersLoaded;
+    }
+  };
+  (async () => {
+    const me = await api('/portal/api/me?fields=session');
+    csrf = me.csrf_token;
+    $('identity').textContent = me.email;
+    signedIn = true;
+    await showRoute();
+  })().catch(e => {
+    $('identity').textContent = 'Not signed in';
+    setStatus(e.message, 'error');
+    setMessage(e.message, 'error');
+  });
+}
+init();
+</script>

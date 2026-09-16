@@ -207,7 +207,7 @@ func TestError_JSONShape(t *testing.T) {
 // operation returns provider.ErrNotSupported, which must map to a terminal
 // invalid_request (non-retryable). Otherwise the router treats it as a transient
 // upstream failure, walks every deployment, and returns a misleading 5xx/429
-// instead of a terminal 4xx (#1491).
+// instead of a terminal 4xx.
 func TestWrap_NotSupportedIsTerminal(t *testing.T) {
 	// The literal must equal provider.ErrNotSupported.Error(). wire cannot import
 	// provider (import cycle) and — per the release boundary (consumers must not

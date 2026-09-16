@@ -6,14 +6,13 @@ package agentmodel
 // which merely CALL the gateway over HTTP can compile against the contract
 // without pulling in the server that implements it. Before the split, importing
 // this package dragged in 23 packages — the router, every provider, the store —
-// because `go list -deps -test` follows this package's own test imports, and
-// cmd/release-export resolves publishable closures the same way.
+// because test dependencies also pull server packages into the build graph.
 //
 // These aliases keep the ~90 server-side files under services/agentmodel/**
 // compiling unchanged. They are scaffolding for the server side, NOT an
 // invitation for new consumers: anything outside this service should import
 // services/agentmodel/wire (types) and services/agentmodel/gateway (client)
-// directly. internal/releasemanifest's boundary tests enforce that.
+// directly. Keep client packages independent of server implementations.
 //
 // Note: type aliases do not carry unexported fields across a package boundary —
 // any code touching Message.rawContent must live in the wire package itself.
@@ -94,5 +93,6 @@ var (
 	RetryAfterFromHeader    = wire.RetryAfterFromHeader
 	ValidateTextOnlyContent = wire.ValidateTextOnlyContent
 	WithRetryAfter          = wire.WithRetryAfter
+	WithUpstreamStatus      = wire.WithUpstreamStatus
 	Wrap                    = wire.Wrap
 )

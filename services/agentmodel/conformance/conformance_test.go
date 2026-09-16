@@ -1,6 +1,6 @@
 package conformance
 
-// Cross-provider conformance test (issue #664): an identical task transcript,
+// Cross-provider conformance test: an identical task transcript,
 // driven by a provider-BLIND driver, must complete and stay OpenAI-shape
 // conformant whether the gateway routes it to an OpenAI-family or an
 // Anthropic-family deployment — switched by config alone (only the deployments
@@ -297,7 +297,7 @@ func assertStreamedToolCall(t *testing.T, chunks []wireChunk) accumulatedToolCal
 					a.id, a.typ, a.name = tc.ID, tc.Type, tc.Function.Name
 					a.sawFirst = true
 				} else {
-					// Later fragments must NOT repeat id/type/name (#664 fix B).
+					// Later fragments must NOT repeat id/type/name .
 					if tc.ID != "" || tc.Type != "" || tc.Function.Name != "" {
 						t.Errorf("[S5] tool-call index %d repeats id/type/name on a non-first fragment (id=%q type=%q name=%q)",
 							idx, tc.ID, tc.Type, tc.Function.Name)

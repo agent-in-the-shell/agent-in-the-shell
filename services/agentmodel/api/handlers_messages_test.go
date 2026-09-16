@@ -136,7 +136,7 @@ func TestMessages_NonStreamingPassthrough(t *testing.T) {
 }
 
 // TestMessages_RecordsProvider pins the audit row's provider column for both
-// /v1/messages paths. #1217 wired usage.Provider through the chat handlers so
+// /v1/messages paths.  wired usage.Provider through the chat handlers so
 // cost lookup could try the catalog's canonical "<provider>/<model>" key, but
 // the messages handlers were missed: every row landed with provider=” and the
 // prefixed lookup silently fell back to the bare model id. That made every
@@ -707,7 +707,7 @@ func TestMessages_RouterError_ReturnsAnthropicEnvelope(t *testing.T) {
 	}
 }
 
-// TestMessages_StreamingUpstreamReadError_RecordsStatusError guards #1487: a
+// TestMessages_StreamingUpstreamReadError_RecordsStatusError guards : a
 // stream that dies WITHOUT an error frame — here a single line exceeding the
 // 1 MiB scanner cap, which surfaces as scanner.Err() (bufio.ErrTooLong) exactly
 // like a mid-stream transport drop — must be audited status=error, not the

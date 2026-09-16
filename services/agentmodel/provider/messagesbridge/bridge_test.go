@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"iter"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -488,7 +489,7 @@ func TestMessagesPassthrough_StreamingError(t *testing.T) {
 }
 
 // TestMessagesPassthrough_StreamingErrorClassifiesType is the /v1/messages
-// sibling of the #705 fix already applied to /v1/chat/completions: the SSE
+// sibling of the fix already applied to /v1/chat/completions: the SSE
 // error frame must carry the classified type and code, not a blanket
 // "api_error". Callers key retry decisions off this — a blown context window
 // is terminal, a transient upstream 500 is not.
@@ -621,6 +622,38 @@ func TestMessagesPassthrough_StreamingOrphanToolArgs(t *testing.T) {
 
 // ─── optional-capability forwarding ──────────────────────────────────────────
 
+func TestBridge_ResponsesPassthrough_ForwardsToWrappedProvider(t *testing.T) {
+	inner := &bridgeResponsesProvider{}
+	b := New(inner)
+	resp, err := b.ResponsesPassthrough(context.Background(), []byte(`{"tools":[{"type":"web_search"}]}`), "gpt-real")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if inner.model != "gpt-real" || string(inner.body) != `{"tools":[{"type":"web_search"}]}` {
+		t.Fatalf("model=%q body=%s", inner.model, inner.body)
+	}
+}
+
+type bridgeResponsesProvider struct {
+	notImageCapable
+	body  []byte
+	model string
+}
+
+func (p *bridgeResponsesProvider) ResponsesPassthrough(_ context.Context, body []byte, model string) (*http.Response, error) {
+	p.body, p.model = body, model
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+}
+
+func TestBridge_ResponsesPassthrough_WrappedProviderNotCapable(t *testing.T) {
+	b := New(notImageCapable{})
+	_, err := b.ResponsesPassthrough(context.Background(), nil, "gpt")
+	if err == nil || agentmodel.Wrap(err).Type != agentmodel.ErrTypeInvalidRequest {
+		t.Fatalf("err=%v, want invalid_request", err)
+	}
+}
+
 func TestBridge_GenerateImage_ForwardsToWrappedProvider(t *testing.T) {
 	// Embedding provider.Provider does not promote optional capability
 	// interfaces like provider.ImageGenerator, so Bridge needs an explicit
@@ -673,7 +706,7 @@ func (notImageCapable) Embed(context.Context, agentmodel.EmbeddingRequest) (agen
 	return agentmodel.EmbeddingResponse{}, nil
 }
 
-// TestChatResponseToAnthropic_EmptyCompletionHasOneBlock guards #1494: a
+// TestChatResponseToAnthropic_EmptyCompletionHasOneBlock guards : a
 // non-stream empty completion must carry one (empty) content block, matching the
 // streaming finish() guard — a zero-block response reads as truncated to a
 // strict Anthropic client.

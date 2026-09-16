@@ -621,7 +621,7 @@ func assertPromptBlocked(t *testing.T, err error) {
 
 // TestComplete_PromptBlockedSurfacesError: a prompt-level safety block (zero
 // candidates + promptFeedback.blockReason) surfaces as a typed content-filter
-// error rather than a silent, signal-less empty HTTP 200 (#1487).
+// error rather than a silent, signal-less empty HTTP 200.
 func TestComplete_PromptBlockedSurfacesError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -639,7 +639,7 @@ func TestComplete_PromptBlockedSurfacesError(t *testing.T) {
 
 // TestStream_PromptBlockedSurfacesError: the SAME block on the streaming path
 // (the default for SDK clients) must yield the error, not swallow it into a
-// truncated success (#1487) — the gap /simplify caught in the first pass.
+// truncated success — the gap /simplify caught in the first pass.
 func TestStream_PromptBlockedSurfacesError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

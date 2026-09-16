@@ -22,6 +22,7 @@ type RequestLog struct {
 	PromptTokens             int
 	CompletionTokens         int
 	TotalTokens              int
+	ReasoningTokens          *int      // upstream detail only; nil = unreported, included per provider's output convention
 	CacheReadInputTokens     int       // cached prompt tokens served at discount rate
 	CacheCreationInputTokens int       // tokens written to cache (Anthropic-only on first use)
 	CostUSD                  float64   // 0 for subscription requests
@@ -39,16 +40,25 @@ type RequestLog struct {
 // the existing budget machinery (api.resolveCap / SumCostByAPIKey) enforces
 // them unchanged; usage attribution rides KeyHash through request_logs.
 type ManagedKey struct {
-	ID             string     // uuid
-	Name           string     // operator-facing label; not unique (the hash is)
-	KeyHash        string     // sha256 hex of the plaintext token; the only copy kept
-	Models         []string   // logical-model allowlist; nil/empty = all models
-	MaxBudget      *float64   // USD per window; nil = uncapped
-	BudgetDuration string     // Go duration; "" = lifetime
-	ExpiresAt      *time.Time // nil = never expires
-	Disabled       bool       // revoked: never authenticates, but row (and its spend) is retained
-	Metadata       string     // optional opaque JSON blob; stored verbatim
-	CreatedAt      time.Time  // unix-second precision; UTC
+	ServiceRevision int64
+	ID              string     // uuid
+	Name            string     // operator-facing label; not unique (the hash is)
+	KeyHash         string     // sha256 hex of the plaintext token; the only copy kept
+	Models          []string   // nil/empty = all for legacy; deny-all for employee/service
+	MaxBudget       *float64   // USD per window; nil = uncapped
+	BudgetDuration  string     // Go duration; "" = lifetime
+	ExpiresAt       *time.Time // nil = never expires
+	Disabled        bool       // reversible pause
+	RevokedAt       *time.Time // permanently retires the current credential; identity/history remain
+	Metadata        string     // optional opaque JSON blob; stored verbatim
+	CreatedAt       time.Time  // unix-second precision; UTC
+	// PortalIssued is true when an employee portal identity owns this key.
+	// Populated by GetKeyByHash only (the auth path), from the same index
+	// hit, so authentication never needs a second query to learn it.
+	PortalIssued bool
+	// ServiceIssued comes only from the explicit service_keys marker on hash lookup.
+	// It conveys inference-only scope, not employee identity or ownership.
+	ServiceIssued bool
 }
 
 // Store is the persistence boundary.
@@ -61,36 +71,37 @@ type Store interface {
 	SumCostByOrg(ctx context.Context, orgID string, since time.Time) (float64, error)
 	// SumCostByAPIKey totals successful-request spend attributed to one API
 	// key hash since the given time — the per-key read for budget enforcement
-	// (#47). A zero `since` covers the whole ledger (lifetime caps).
+	//. A zero `since` covers the whole ledger (lifetime caps).
 	SumCostByAPIKey(ctx context.Context, apiKeyHash string, since time.Time) (float64, error)
 	CountRequestsByOrg(ctx context.Context, orgID string, since time.Time, authMode string) (int64, error)
 	// UsageReport aggregates request_logs into per-bucket rollups (requests,
 	// tokens incl. the cache split, cost, error_rate) over a time window for
 	// one org, grouped by a single dimension. It is the read surface behind the
-	// `agent-model usage` CLI and the /v1/usage HTTP endpoint (#500).
+	// `agent-model usage` CLI and the /v1/usage HTTP endpoint.
 	UsageReport(ctx context.Context, f UsageFilter) ([]UsageRow, error)
 	// Purge deletes audit rows created before `before` and returns the number
 	// removed. Retention is opt-in: rows persist indefinitely until purged.
 	Purge(ctx context.Context, before time.Time) (int64, error)
 
-	// --- Runtime virtual keys (#922) ---
+	// --- Runtime virtual keys ---
 	// CreateKey persists a freshly minted key. It fails if KeyHash collides
 	// with an existing row (the hash is unique).
 	CreateKey(ctx context.Context, k ManagedKey) error
 	// GetKeyByHash resolves a key by its sha256 hash — the auth-path read.
 	// Returns ErrNotFound if no row matches.
 	GetKeyByHash(ctx context.Context, keyHash string) (ManagedKey, error)
-	// GetKeyByID resolves a key by its id — the management read behind the
-	// info/revoke endpoints. Returns ErrNotFound if no row matches.
+	// GetKeyByID resolves a key and its Portal/Service classification in one
+	// snapshot by stable ID — the management read behind info/revoke endpoints.
+	// Returns ErrNotFound if no row matches.
 	GetKeyByID(ctx context.Context, id string) (ManagedKey, error)
 	// ListKeys returns all managed keys, newest first. Never includes plaintext
 	// (there is none to include).
 	ListKeys(ctx context.Context) ([]ManagedKey, error)
-	// SetKeyDisabled toggles a key's revoked flag by id, returning ErrNotFound
-	// if no row matches. Revoking retains the row so historical request_logs
-	// stay attributable.
+	// SetKeyDisabled toggles a non-revoked key's pause by id, returning ErrNotFound
+	// if no non-revoked row matches. No history or grants are changed.
 	SetKeyDisabled(ctx context.Context, id string, disabled bool) error
-	// DeleteKey hard-deletes a key by id, returning ErrNotFound if no row
+	// DeleteKey permanently revokes a credential, retaining its row and history.
+	// It is idempotent and returns ErrNotFound if no row
 	// matches.
 	DeleteKey(ctx context.Context, id string) error
 

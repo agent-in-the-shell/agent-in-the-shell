@@ -21,26 +21,15 @@ var (
 // DownloadVideo fetches a Veo result asset with the gateway's provider
 // credential (Veo URLs require x-goog-api-key), returning the byte stream and
 // content type so the gateway can proxy it to a client that holds only the
-// gateway bearer (#1493). The caller closes the returned reader.
+// gateway bearer. The caller closes the returned reader.
 func (c *Client) DownloadVideo(ctx context.Context, assetURL string) (io.ReadCloser, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("gemini: build download-video request: %w", err)
 	}
-	if c.auth != nil {
-		if err := c.auth.Apply(ctx, req); err != nil {
-			return nil, "", err
-		}
-	}
-	resp, err := c.http.Do(req)
+	resp, err := c.send(ctx, req, "download-video")
 	if err != nil {
-		return nil, "", fmt.Errorf("gemini: download-video: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		return nil, "", agentmodel.NewErrorf(agentmodel.ErrTypeUpstream,
-			"gemini: download-video HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, "", err
 	}
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
@@ -53,7 +42,7 @@ func (c *Client) DownloadVideo(ctx context.Context, assetURL string) (io.ReadClo
 // predictLongRunning method, which returns a google.longrunning.Operation; the
 // poll is a plain GET on that operation name. The resulting video URI requires
 // the gateway's Gemini credential to download (x-goog-api-key), so it is handed
-// back as-is for now — proxying/persisting the bytes is a follow-up (#841).
+// back as-is for now — proxying/persisting the bytes is a follow-up.
 
 type veoInstance struct {
 	Prompt string `json:"prompt,omitempty"`
@@ -113,7 +102,7 @@ func (c *Client) SubmitVideo(ctx context.Context, req agentmodel.GenerateVideoRe
 	}
 
 	path := fmt.Sprintf("/v1beta/models/%s:predictLongRunning", req.Model)
-	httpResp, err := c.doJSON(ctx, path, body)
+	httpResp, err := c.doJSON(ctx, path, body, "submit-video")
 	if err != nil {
 		return agentmodel.VideoOperation{}, err
 	}
@@ -135,7 +124,7 @@ func (c *Client) PollVideo(ctx context.Context, providerOpID string) (agentmodel
 	if providerOpID == "" {
 		return agentmodel.VideoOperation{}, agentmodel.NewErrorf(agentmodel.ErrTypeInvalidRequest, "gemini: operation id required")
 	}
-	httpResp, err := c.doGET(ctx, "/v1beta/"+strings.TrimPrefix(providerOpID, "/"))
+	httpResp, err := c.doGET(ctx, "/v1beta/"+strings.TrimPrefix(providerOpID, "/"), "poll-video")
 	if err != nil {
 		return agentmodel.VideoOperation{}, err
 	}
@@ -195,24 +184,10 @@ func veoToOperation(op veoOperation, model string) agentmodel.VideoOperation {
 // doGET issues an authenticated GET against the Gemini API. The POST sibling
 // (doJSON) lives in gemini.go; the long-running-operation poll is the first GET
 // path beyond ListModels that the provider needs.
-func (c *Client) doGET(ctx context.Context, path string) (*http.Response, error) {
+func (c *Client) doGET(ctx context.Context, path, op string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return nil, err
 	}
-	if c.auth != nil {
-		if err := c.auth.Apply(ctx, req); err != nil {
-			return nil, err
-		}
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("gemini: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
-	}
-	return resp, nil
+	return c.send(ctx, req, op)
 }

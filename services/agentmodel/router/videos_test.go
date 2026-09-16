@@ -114,7 +114,7 @@ func (v *videoStub) DownloadVideo(_ context.Context, assetURL string) (io.ReadCl
 }
 
 // TestDownloadVideo_ResolvesRepollsAndStreams: the router decodes the gateway op
-// id, re-polls for a fresh asset URL, and streams via VideoDownloader (#1493).
+// id, re-polls for a fresh asset URL, and streams via VideoDownloader.
 func TestDownloadVideo_ResolvesRepollsAndStreams(t *testing.T) {
 	vs := &videoStub{
 		Stub:     &stub.Stub{NameValue: "gemini"},

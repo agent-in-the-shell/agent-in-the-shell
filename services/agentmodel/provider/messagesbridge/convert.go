@@ -257,11 +257,16 @@ type anthropicRespBlock struct {
 	Input json.RawMessage `json:"input,omitempty"`
 }
 
+type thinkingTokensDetails struct {
+	ThinkingTokens *int `json:"thinking_tokens"`
+}
+
 type anthropicUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	OutputTokensDetails      *thinkingTokensDetails `json:"output_tokens_details,omitempty"`
+	InputTokens              int                    `json:"input_tokens"`
+	OutputTokens             int                    `json:"output_tokens"`
+	CacheReadInputTokens     int                    `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int                    `json:"cache_creation_input_tokens,omitempty"`
 }
 
 // chatResponseToAnthropic converts a non-streaming ChatResponse into the
@@ -314,7 +319,12 @@ func usageToAnthropic(u agentmodel.Usage) anthropicUsage {
 	if input < 0 {
 		input = 0
 	}
+	var details *thinkingTokensDetails
+	if u.ReasoningTokens != nil {
+		details = &thinkingTokensDetails{ThinkingTokens: u.ReasoningTokens}
+	}
 	return anthropicUsage{
+		OutputTokensDetails:      details,
 		InputTokens:              input,
 		OutputTokens:             u.CompletionTokens,
 		CacheReadInputTokens:     u.CacheReadInputTokens,

@@ -18,6 +18,7 @@ import (
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/router"
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/store"
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/streaming"
+	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/wire"
 )
 
 func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +36,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pre-request enforcement (#47/#52): model allowlist, then budget caps —
+	// Pre-request enforcement: model allowlist, then budget caps —
 	// both rejected before any upstream call. Rejections are audit-logged so
 	// a throttled key is visible in the ledger.
 	vk := vkFromCtx(r.Context())
@@ -54,14 +55,19 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNonStreamingChat(w http.ResponseWriter, r *http.Request, req agentmodel.ChatRequest, blocked []string) {
-	// Response cache (#48): a content-addressed lookup keyed on the
+	// Response cache: a content-addressed lookup keyed on the
 	// output-affecting request fields. A hit returns the original response
 	// verbatim — ledgered at $0 (cost_source "cache") so it advances no budget —
 	// and never reaches an upstream provider. Enforcement (allowlist + budget)
 	// already ran in chatCompletions, so a restricted/over-budget key is gated
 	// before it can ever be served from cache.
 	var cacheKey string
-	if s.cache != nil {
+	// A key with a model allowlist never reads or seeds the shared cache: an
+	// entry may have been produced by a fallback outside that key's policy.
+	// This is a property of the allowlist, not of how the key was issued.
+	vk := vkFromCtx(r.Context())
+	useCache := s.cache != nil && (vk == nil || vk.models == nil)
+	if useCache {
 		cacheKey = chatCacheKey(req)
 		cstart := time.Now()
 		if raw, ok := s.cache.Get(r.Context(), cacheKey); ok {
@@ -98,7 +104,7 @@ func (s *Server) handleNonStreamingChat(w http.ResponseWriter, r *http.Request, 
 	}
 	// Backfill created: the OpenAI contract requires a non-zero unix timestamp,
 	// but not every provider sets it (the Anthropic adapter leaves it 0). Stamp
-	// it here so all providers' responses are OpenAI-shape-conformant (#664).
+	// it here so all providers' responses are OpenAI-shape-conformant.
 	if resp.Created == 0 {
 		resp.Created = time.Now().Unix()
 	}
@@ -116,8 +122,8 @@ func (s *Server) handleNonStreamingChat(w http.ResponseWriter, r *http.Request, 
 
 	// Seed the cache after the client response is written (off the latency path),
 	// with a detached context so a client that disconnects mid-response still
-	// caches the result for the next caller. Streaming is not cached (#48 v1).
-	if s.cache != nil && len(resp.Choices) > 0 {
+	// caches the result for the next caller. Streaming is not cached .
+	if useCache && len(resp.Choices) > 0 {
 		s.cache.Set(context.WithoutCancel(r.Context()), cacheKey, body)
 	}
 
@@ -126,16 +132,21 @@ func (s *Server) handleNonStreamingChat(w http.ResponseWriter, r *http.Request, 
 }
 
 // chatCacheKey derives a content-addressed cache key from the request fields
-// that affect the model's output. It hashes the request itself with the two
+// that affect the model's output. It hashes the request itself with the three
 // non-determinants zeroed — Stream (so a streamed and non-streamed call for the
-// same prompt share an entry) and User (a tracking tag, not an output
-// determinant; matching LiteLLM's default key). Keying by exclusion rather than
-// an allowlist means a newly-added request field is key-affecting by default:
-// the safe failure direction for a cache key is a spurious miss, never a wrong
-// hit. req is a value copy, so zeroing here does not touch the caller's request.
+// same prompt share an entry), User (a tracking tag, not an output determinant;
+// matching LiteLLM's default key), and PromptCacheKey (routing and
+// prefix-recurrence metadata for the upstream, and per-session by construction:
+// leaving it in would make two identical prompts from two sessions miss each
+// other, so the response cache would degrade exactly as clients started sending
+// it). Keying by exclusion rather than an allowlist means a newly-added request
+// field is key-affecting by default: the safe failure direction for a cache key
+// is a spurious miss, never a wrong hit. req is a value copy, so zeroing here
+// does not touch the caller's request.
 func chatCacheKey(req agentmodel.ChatRequest) string {
 	req.Stream = false
 	req.User = ""
+	req.PromptCacheKey = ""
 	b, err := json.Marshal(req)
 	if err != nil {
 		return "chat:nokey:" + uuid.NewString()
@@ -183,7 +194,7 @@ func (s *Server) handleStreamingChat(w http.ResponseWriter, r *http.Request, req
 		if err != nil {
 			// Route through Wrap so the SSE error frame carries the accurate
 			// type and (when classifiable) code/param instead of a hardcoded
-			// upstream_error with no code (#705).
+			// upstream_error with no code.
 			_ = sw.SendError(agentmodel.Wrap(err))
 			_ = sw.Done()
 			s.logFailure(r.Context(), req, err, time.Since(start), meta)
@@ -191,12 +202,12 @@ func (s *Server) handleStreamingChat(w http.ResponseWriter, r *http.Request, req
 		}
 
 		// Translate provider StreamChunk -> OpenAI streaming chunk shape.
-		out := streamChunkOpenAI{
+		out := wire.StreamChunk{
 			ID:      respID,
 			Object:  "chat.completion.chunk",
 			Created: created,
 			Model:   req.Model,
-			Choices: []streamChunkChoice{
+			Choices: []wire.StreamChoice{
 				{
 					Index:        0,
 					Delta:        chunk.Delta,
@@ -214,15 +225,15 @@ func (s *Server) handleStreamingChat(w http.ResponseWriter, r *http.Request, req
 			contentAcc.add(chunk.Delta, chunk.FinishReason)
 		}
 		if chunk.Usage != nil {
-			out.Usage = chunk.Usage
-			finalUsage = *chunk.Usage
+			finalUsage = finalUsage.Absorb(*chunk.Usage)
+			out.Usage = &finalUsage
 		}
 		if err := sw.Send(out); err != nil {
 			// Client disconnected. The upstream tokens were still generated
 			// and billed, so persist whatever usage we accumulated — an
 			// unlogged aborted stream would be invisible to the cost ledger
 			// and let a capped key evade its budget by aborting streams
-			// (#47). Usage may be zero if the provider's usage chunk never
+			//. Usage may be zero if the provider's usage chunk never
 			// arrived; logging the row is still the right fail-direction.
 			finalUsage.AuthMode = meta.AuthMode
 			finalUsage.Provider = meta.Provider
@@ -241,18 +252,18 @@ func (s *Server) handleStreamingChat(w http.ResponseWriter, r *http.Request, req
 	// guarantee well-formed output regardless of provider — mirroring LiteLLM's
 	// finish_reason_handler default. Prefer "tool_calls" when tool-call deltas
 	// were seen: defaulting to "stop" mid tool call makes agents conclude the
-	// turn ended and silently drop the call (cf. LiteLLM #19744, #12862).
+	// turn ended and silently drop the call (cf. LiteLLM , ).
 	if !sawFinish {
 		reason := "stop"
 		if sawToolCall {
 			reason = "tool_calls"
 		}
-		_ = sw.Send(streamChunkOpenAI{
+		_ = sw.Send(wire.StreamChunk{
 			ID:      respID,
 			Object:  "chat.completion.chunk",
 			Created: created,
 			Model:   req.Model,
-			Choices: []streamChunkChoice{{Index: 0, FinishReason: reason}},
+			Choices: []wire.StreamChoice{{Index: 0, FinishReason: reason}},
 		})
 	}
 	_ = sw.Done()
@@ -268,21 +279,6 @@ func (s *Server) handleStreamingChat(w http.ResponseWriter, r *http.Request, req
 	}
 	s.logSuccess(r.Context(), req, &resp, time.Since(start), src)
 	logContent()
-}
-
-type streamChunkOpenAI struct {
-	ID      string              `json:"id"`
-	Object  string              `json:"object"`
-	Created int64               `json:"created"`
-	Model   string              `json:"model"`
-	Choices []streamChunkChoice `json:"choices"`
-	Usage   *agentmodel.Usage   `json:"usage,omitempty"`
-}
-
-type streamChunkChoice struct {
-	Index        int                `json:"index"`
-	Delta        agentmodel.Message `json:"delta"`
-	FinishReason string             `json:"finish_reason,omitempty"`
 }
 
 // ─── Logging helpers ──────────────────────────────────────────────────────
@@ -307,7 +303,7 @@ func (s *Server) writeRequestLog(ctx context.Context, rl store.RequestLog) {
 
 	// The audit row must land even when the client has gone away — a
 	// canceled request context would otherwise abort the store write,
-	// making disconnected streams invisible to budget enforcement (#47).
+	// making disconnected streams invisible to budget enforcement.
 	ctx = context.WithoutCancel(ctx)
 
 	// Fan the audit row out to the observability sinks (Prometheus + OTLP).
@@ -331,7 +327,7 @@ const (
 // returns the cost Source ("priced" | "subscription" | "unpriced") for the
 // audit log. When the model is absent from the price registry the cost is $0
 // but the Source is "unpriced" — and we emit a warning — so the spend gap is
-// visible rather than silently logged as a real $0. See issue #511.
+// visible rather than silently logged as a real $0. See issue .
 func (s *Server) priceUsage(ctx context.Context, modelUsed string, usage *agentmodel.Usage) string {
 	c, src := cost.CalculateWithSource(modelUsed, *usage, s.registry)
 	usage.CostUSD = c
@@ -355,6 +351,7 @@ func buildUsageLog(modelRequested, modelUsed string, usage agentmodel.Usage, lat
 		PromptTokens:             usage.PromptTokens,
 		CompletionTokens:         usage.CompletionTokens,
 		TotalTokens:              usage.TotalTokens,
+		ReasoningTokens:          usage.ReasoningTokens,
 		CacheReadInputTokens:     usage.CacheReadInputTokens,
 		CacheCreationInputTokens: usage.CacheCreationInputTokens,
 		CostUSD:                  usage.CostUSD,
@@ -383,7 +380,7 @@ func (s *Server) logFailure(ctx context.Context, req agentmodel.ChatRequest, err
 	// Failed requests have no computed cost, so leave CostSource empty. meta
 	// attributes the failing deployment (empty for pre-routing rejections and
 	// multi-deployment exhaustion, which have no single one to blame) so the
-	// audit row carries provider/auth_mode like the /v1/messages path (#1492).
+	// audit row carries provider/auth_mode like the /v1/messages path.
 	usage := agentmodel.Usage{Provider: meta.Provider, AuthMode: meta.AuthMode}
 	// model_used is the resolved UPSTREAM id when known (matching
 	// logMessagesFailure), falling back to the caller's alias — otherwise the
@@ -417,7 +414,7 @@ func setRetryAfter(w http.ResponseWriter, e *agentmodel.Error) {
 
 // writeError writes an OpenAI-shaped error JSON response. It marshals the typed
 // *agentmodel.Error so the struct's omitempty tags apply — an empty Code or
-// Param is omitted from the wire entirely rather than emitted as "" (#705). All
+// Param is omitted from the wire entirely rather than emitted as "". All
 // three official OpenAI SDKs treat an absent code identically to a null one.
 func writeError(w http.ResponseWriter, status int, e *agentmodel.Error) {
 	w.Header().Set("Content-Type", "application/json")

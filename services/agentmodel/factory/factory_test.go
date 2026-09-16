@@ -155,7 +155,7 @@ func TestBuildProviderPoolMultipleTokensReturnsPool(t *testing.T) {
 	}
 	// Two tokens must wrap in pool.New. Assert by type, not Name(): a pool now
 	// delegates Name() to its (homogeneous) underlying provider so cost pricing
-	// resolves (#1486), so "pool" is no longer an observable marker.
+	// resolves, so "pool" is no longer an observable marker.
 	if _, ok := p.(*pool.Pool); !ok {
 		t.Errorf("want *pool.Pool, got %T", p)
 	}
@@ -249,7 +249,7 @@ func TestBuildDeploymentProviderAPIKey(t *testing.T) {
 }
 
 func TestBuildDeploymentProviderAzure(t *testing.T) {
-	// End-to-end (#892): provider:azure must route to the azure client with
+	// End-to-end: provider:azure must route to the azure client with
 	// api-key auth and a deployment that defaults to the model name, then dispatch
 	// to Azure's deployment-scoped path with the api-version query.
 	var gotPath, gotQuery, gotAPIKey string
@@ -493,7 +493,7 @@ func TestBuildDeploymentProviderSubscriptionAnthropicOAuthTokenDirsPool(t *testi
 	if _, ok := p.(*messagesbridge.Bridge); ok {
 		t.Error("anthropic pool must not be wrapped in a messagesbridge")
 	}
-	// Name() must stay "anthropic" so the cost registry keys resolve (#1486).
+	// Name() must stay "anthropic" so the cost registry keys resolve.
 	if p.Name() != "anthropic" {
 		t.Errorf("Name()=%q, want anthropic (pool delegates to its underlying provider)", p.Name())
 	}
@@ -540,7 +540,7 @@ func TestBuildDeploymentProviderSubscriptionChatGPTOAuthTokenDirsPool(t *testing
 	}
 	// Two dirs => a messagesbridge.Bridge wrapping a rotating pool. Assert by
 	// type through the bridge's embedded provider: Name() no longer marks a pool
-	// (it delegates to the underlying "chatgpt" so cost pricing resolves, #1486).
+	// (it delegates to the underlying "chatgpt" so cost pricing resolves, ).
 	if p == nil {
 		t.Fatal("provider is nil, want a bridge-wrapped pool")
 	}
@@ -643,7 +643,7 @@ func TestBuildDeploymentsWiresAndSkips(t *testing.T) {
 	}
 	dep := deployments["gpt"][0]
 	if dep.Name != "openai/gpt-4|api_key" {
-		t.Errorf("deployment name = %q, want openai/gpt-4|api_key (auth mode disambiguates the cooldown/rate-meter identity, #1489)", dep.Name)
+		t.Errorf("deployment name = %q, want openai/gpt-4|api_key (auth mode disambiguates the cooldown/rate-meter identity)", dep.Name)
 	}
 	if dep.Weight != 100 {
 		t.Errorf("deployment weight = %d, want 100", dep.Weight)
@@ -723,7 +723,7 @@ func TestBuildProvider_OpenAICompat(t *testing.T) {
 }
 
 // TestBuildDeployments_SameProviderModelDifferentAuthGetDistinctNames guards
-// #1489: two deployments under one model_name that share a provider string and
+// : two deployments under one model_name that share a provider string and
 // model but differ in auth mode must get DISTINCT Names. dep.Name is the cooldown
 // and rate-meter identity (router.depKey), so identical Names would make cooling
 // the subscription deployment after a 429 also park the api_key one — defeating
@@ -748,14 +748,14 @@ func TestBuildDeployments_SameProviderModelDifferentAuthGetDistinctNames(t *test
 		t.Fatalf("deployments = %d, want 2", len(got))
 	}
 	if got[0].Name == got[1].Name {
-		t.Errorf("two deployments differing only in auth mode share Name %q — they will share one cooldown/rate-limit bucket (#1489)", got[0].Name)
+		t.Errorf("two deployments differing only in auth mode share Name %q — they will share one cooldown/rate-limit bucket", got[0].Name)
 	}
 }
 
 // wptr returns a pointer to w, for DeploymentConfig.Weight (*int) literals.
 func wptr(w int) *int { return &w }
 
-// TestBuildDeployments_Weight0Disables guards #1494: an explicit weight: 0 drops
+// TestBuildDeployments_Weight0Disables guards : an explicit weight: 0 drops
 // the deployment; an omitted weight defaults to 1.
 func TestBuildDeployments_Weight0Disables(t *testing.T) {
 	t.Setenv("K1", "a")
@@ -798,7 +798,7 @@ func TestBuildDeployments_OmittedWeightDefaultsTo1(t *testing.T) {
 	}
 }
 
-// TestBuildDeployments_CacheTTLBuildsWithoutPanic guards #1494: a valid cache_ttl
+// TestBuildDeployments_CacheTTLBuildsWithoutPanic guards : a valid cache_ttl
 // threads into anthropic.WithCacheTTL without panicking.
 func TestBuildDeployments_CacheTTLBuildsWithoutPanic(t *testing.T) {
 	t.Setenv("AK", "x")

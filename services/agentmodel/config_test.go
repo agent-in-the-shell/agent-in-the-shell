@@ -19,18 +19,23 @@ func writeYAML(t *testing.T, content string) string {
 	return path
 }
 
+// HOME and XDG_CONFIG_HOME are isolated deliberately. This test used to read the
+// real home directory, which was harmless while the path was hardcoded — but
+// once  routed it through herospath's legacy-in-place resolver the answer
+// depends on whether ~/.config/agentmodel/config.yaml happens to exist, so it
+// passed on a developer machine that had one and failed on a clean CI runner.
+// The per-case behaviours live in config_path_test.go.
 func TestDefaultConfigPath(t *testing.T) {
 	t.Setenv("AGENT_MODEL_CONFIG", "/custom/agentmodel.yaml")
 	if got := agentmodel.DefaultConfigPath(); got != "/custom/agentmodel.yaml" {
 		t.Fatalf("DefaultConfigPath with env = %q", got)
 	}
 
+	home := t.TempDir()
 	t.Setenv("AGENT_MODEL_CONFIG", "")
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skipf("no home dir: %v", err)
-	}
-	want := filepath.Join(home, ".config", "agentmodel", "config.yaml")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", home)
+	want := filepath.Join(home, ".config", "heros", "agentmodel", "config.yaml")
 	if got := agentmodel.DefaultConfigPath(); got != want {
 		t.Fatalf("DefaultConfigPath = %q, want %q", got, want)
 	}
@@ -496,7 +501,7 @@ model_list:
 
 func TestLoadConfig_AnthropicOAuthTokenDirsPool(t *testing.T) {
 	// Multi-account Anthropic subscriptions pool through refreshable token
-	// directories, the same knob chatgpt uses (#58).
+	// directories, the same knob chatgpt uses.
 	path := writeYAML(t, `
 model_list:
   - model_name: "claude-sonnet-4-5"
@@ -1027,7 +1032,7 @@ func TestLoadConfig_BudgetWithinRetentionOK(t *testing.T) {
 	}
 }
 
-// TestValidate_CacheTTL guards #1494: cache_ttl must be a valid Anthropic value
+// TestValidate_CacheTTL guards : cache_ttl must be a valid Anthropic value
 // (WithCacheTTL would otherwise panic) and is anthropic-only.
 func TestValidate_CacheTTL(t *testing.T) {
 	load := func(yaml string) error {

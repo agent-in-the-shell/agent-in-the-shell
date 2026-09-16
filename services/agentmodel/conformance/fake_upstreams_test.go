@@ -3,7 +3,7 @@ package conformance
 // Stateful fake upstream servers that speak the NATIVE OpenAI and Anthropic
 // wire dialects, sitting behind agent-model's real provider adapters. They are
 // the deterministic CI substrate for the cross-provider conformance test
-// (issue #664): the gateway translates a single OpenAI-shaped request into each
+//: the gateway translates a single OpenAI-shaped request into each
 // provider's dialect, the fake replies in that dialect, and the gateway
 // translates back. A stub plugged in behind the adapters (provider/stub) could
 // only prove the normalized waist equals itself — these fakes exercise the

@@ -8,7 +8,7 @@ import (
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/cost"
 )
 
-// Replicate per-output cost metering (Phase 2a, #851).
+// Replicate per-output cost metering (Phase 2a, ).
 //
 // Replicate exposes no cost via its API (verified: no billing endpoint, no cost
 // field on the prediction). For its Official Models, billing is per output unit

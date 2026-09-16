@@ -1,0 +1,253 @@
+/* Shared by portal.html and portal_admin.html: tokens, base type, header, sections,
+   controls, badges, status, ledger, tooltip and the phone layout. Spliced into each page's
+   nonce'd style element by servePortalHTML, so the pages stay siblings without a static route. */
+/* Graph-paper worksheet. A single faint 28px grid with two soft radial washes (a bright
+   corner and a warm shadow) so the paper reads as texture, not as lines. Spacing still
+   uses an 18px pitch (one heatmap cell plus gap) so vertical rhythm matches the calendar. */
+:root {
+  color-scheme: light;
+  --paper: #f4f1ea;
+  --grid: rgba(35, 31, 24, 0.038);
+  --glow: rgba(255, 255, 255, 0.9);
+  --shade: rgba(205, 194, 172, 0.22);
+  --card: #fffdf8;
+  --glass: rgba(255, 253, 248, 0.78);
+  --ink: #1b2130;
+  --muted: #5d6573;
+  --line: #c9c3b4;
+  --accent: #1f5fbf;
+  --danger: #b3261e;
+  --danger-soft: #fbe7e5;
+  --warn: #7a4f00;
+  --warn-soft: #fff1d6;
+  --ok: #1e6b3a;
+  --ok-soft: #e1f3e6;
+  --lvl0: #e6e4dc;
+  --lvl1: #c5e3bf;
+  --lvl2: #7cc27f;
+  --lvl3: #2f8b4e;
+  --lvl4: #17532d;
+  --cell-border: rgba(20, 30, 40, 0.14);
+  --focus: #1f5fbf;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --pitch: 18px;
+  --edge: calc(var(--pitch) * 3);
+  --measure: 68ch;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper: #15171b;
+    --grid: rgba(255, 255, 255, 0.034);
+    --glow: rgba(255, 255, 255, 0.05);
+    --shade: rgba(0, 0, 0, 0.35);
+    --card: #1c1f25;
+    --glass: rgba(28, 31, 37, 0.8);
+    --ink: #ebe9e3;
+    --muted: #a2a7b0;
+    --line: #3a404a;
+    --accent: #8ab8ff;
+    --danger: #ff9a92;
+    --danger-soft: #3d1f1d;
+    --warn: #ffd27a;
+    --warn-soft: #3a2d10;
+    --ok: #8fdca7;
+    --ok-soft: #1c3526;
+    --lvl0: #262a31;
+    --lvl1: #1f4a2c;
+    --lvl2: #2b7a42;
+    --lvl3: #45b364;
+    --lvl4: #9ceab0;
+    --cell-border: rgba(255, 255, 255, 0.12);
+    --focus: #8ab8ff;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #15171b;
+  --grid: rgba(255, 255, 255, 0.034);
+  --glow: rgba(255, 255, 255, 0.05);
+  --shade: rgba(0, 0, 0, 0.35);
+  --card: #1c1f25;
+  --glass: rgba(28, 31, 37, 0.8);
+  --ink: #ebe9e3;
+  --muted: #a2a7b0;
+  --line: #3a404a;
+  --accent: #8ab8ff;
+  --danger: #ff9a92;
+  --danger-soft: #3d1f1d;
+  --warn: #ffd27a;
+  --warn-soft: #3a2d10;
+  --ok: #8fdca7;
+  --ok-soft: #1c3526;
+  --lvl0: #262a31;
+  --lvl1: #1f4a2c;
+  --lvl2: #2b7a42;
+  --lvl3: #45b364;
+  --lvl4: #9ceab0;
+  --cell-border: rgba(255, 255, 255, 0.12);
+  --focus: #8ab8ff;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { background: var(--paper); }
+body {
+  margin: 0;
+  min-height: 100vh;
+  font: 15px/1.5 var(--sans);
+  color: var(--ink);
+  background-color: var(--paper);
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px),
+    radial-gradient(circle at 82% 18%, var(--glow), transparent 38%),
+    radial-gradient(circle at 18% 84%, var(--shade), transparent 42%);
+  background-size: 28px 28px, 28px 28px, 100% 100%, 100% 100%;
+  background-attachment: scroll, scroll, fixed, fixed;
+  -webkit-text-size-adjust: 100%;
+}
+a { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible, [tabindex]:focus-visible, summary:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+code, pre, .mono { font-family: var(--mono); font-size: 0.92em; }
+h1, h2, h3 { margin: 0; line-height: 1.2; letter-spacing: -0.015em; }
+h1 { font-size: 1.15rem; font-weight: 650; }
+h2 { font-size: 1.7rem; font-weight: 700; letter-spacing: -0.025em; }
+h3 { font-size: 0.95rem; font-weight: 650; }
+p { margin: 0 0 0.8em; max-width: var(--measure); }
+small, .muted { color: var(--muted); }
+small { font-size: 0.86em; }
+.footnote { margin-top: var(--pitch); font-size: 0.82rem; line-height: 1.5; color: var(--muted); max-width: var(--measure); }
+
+/* Header: one pitch-multiple tall (72px), sitting directly on the paper. */
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px calc(var(--pitch) * 2);
+  min-height: calc(var(--pitch) * 4);
+  padding: 12px var(--edge);
+}
+.brand { display: flex; align-items: baseline; gap: 12px; flex: 1 1 auto; min-width: 0; }
+.brand .eyebrow { font-family: var(--mono); font-size: 0.74rem; color: var(--muted); }
+.who { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; font-size: 0.9rem; }
+#identity { font-family: var(--mono); font-size: 0.86rem; word-break: break-all; }
+.theme { display: inline-flex; gap: 2px; font-size: 0.8rem; }
+.theme button { margin: 0; min-height: 30px; padding: 2px 6px; color: var(--muted); font-size: inherit; text-decoration: none; }
+.theme button + button::before { content: "\00b7"; margin-right: 8px; color: var(--line); }
+.theme button[aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
+
+main {
+  display: grid;
+  gap: calc(var(--pitch) * 4);
+  padding: calc(var(--pitch) * 2) var(--edge) calc(var(--pitch) * 5);
+  max-width: 1800px;
+}
+.row { display: grid; gap: calc(var(--pitch) * 3) calc(var(--pitch) * 4); grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); }
+
+/* Sections: numbered eyebrow, big title, actions on the right. */
+.card { min-width: 0; padding-top: 10px; }
+.card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px 24px;
+  margin-bottom: calc(var(--pitch) * 1.5);
+}
+.card-head h2 .num { display: block; font-family: var(--mono); font-size: 0.74rem; font-weight: 500; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 6px; }
+.card-head .hint { flex-basis: 100%; margin: 0; }
+.card h3 { margin: calc(var(--pitch) * 1.5) 0 8px; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+/* Control chrome (inked border, 36px, hover fill) applies to action buttons only. Text-like
+   buttons — the theme switch, example tabs, calendar days — opt out here rather than undoing
+   each property afterwards. :where() keeps the rule at element specificity so variants such
+   as .small, .ghost or a chip's remove button still win with a single class. */
+button, select, input[type="search"] { font: inherit; color: var(--ink); background: transparent; border: 0; }
+button { cursor: pointer; }
+button:where(:not(.theme *):not(.tabs *):not(.day)), select, input[type="search"] { border: 1px solid var(--ink); min-height: 36px; padding: 4px 14px; }
+button:where(:not(.theme *):not(.tabs *):not(.day)):hover:not(:disabled) { background: var(--glass); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--ink); color: var(--paper); }
+button.primary:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.small { min-height: 26px; padding: 0 8px; font-size: 0.78rem; border-color: var(--line); color: var(--muted); }
+button.small:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
+select { max-width: 100%; font-family: var(--mono); font-size: 0.9rem; background: var(--glass); }
+input[type="search"] { min-width: 240px; background: var(--glass); }
+
+.badge {
+  display: inline-block;
+  padding: 0 7px;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 20px;
+  vertical-align: 3px;
+  white-space: nowrap;
+}
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.danger { background: var(--danger-soft); color: var(--danger); }
+.badge.neutral { background: var(--glass); color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); }
+
+/* Status line: plain muted text by default; an error or confirmation gets a rule so it
+   reads as a distinct surface. Tone is set by data-tone. */
+.status { margin: 10px 0 0; font-size: 0.86rem; color: var(--muted); max-width: none; }
+.status:empty { display: none; }
+.status[data-tone="error"], .status[data-tone="ok"] { margin-top: var(--pitch); padding: 8px 12px; border-left: 3px solid var(--line); background: var(--glass); font-size: inherit; }
+.status[data-tone="error"] { border-color: var(--danger); color: var(--danger); }
+.status[data-tone="ok"] { border-color: var(--ok); color: var(--ok); }
+.status code { font-size: 0.85em; }
+
+/* Ledger: figures set directly on the paper, no boxes. */
+.ledger { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--pitch) calc(var(--pitch) * 2); margin: 0; }
+.ledger > div { min-width: 0; padding-top: 6px; }
+.ledger dt { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.ledger dd { margin: 2px 0 0; font-size: 2rem; line-height: 1.15; font-weight: 600; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.ledger dd.text { font-size: 1rem; font-weight: 500; letter-spacing: 0; }
+.ledger dd.mono { font-size: 0.8rem; }
+
+/* Tooltip: positioned from an anchor's box by placeTip, kept inside its .chart container. */
+.chart { position: relative; }
+.tip {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  min-width: 180px;
+  padding: 8px 12px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  font-size: 0.82rem;
+  transform: translate(-50%, calc(-100% - 10px));
+}
+.tip b { display: block; margin-bottom: 4px; font-family: var(--mono); font-size: 0.72rem; font-weight: 500; letter-spacing: 0.06em; color: var(--muted); }
+.tip dl { display: grid; grid-template-columns: auto auto; gap: 2px 16px; margin: 0; }
+.tip dt { color: var(--muted); }
+.tip dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 640px) {
+  :root { --edge: var(--pitch); }
+  /* Fixed background layers force main-thread scrolling on mobile browsers. */
+  body { font-size: 14px; background-attachment: scroll; }
+  h2 { font-size: 1.4rem; }
+  .ledger dd { font-size: 1.6rem; }
+  button, select { min-height: 40px; }
+  /* Header on phones: the name sits alone on the first row with the theme switch at the
+     right, the eyebrow drops under it, and identity plus the cross link share the last row. */
+  .top { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 6px 12px; padding: 14px var(--edge) 12px; min-height: 0; }
+  .brand { display: grid; gap: 0; }
+  .brand .eyebrow { order: 2; }
+  .who { display: contents; }
+  .theme { grid-column: 2; grid-row: 1; justify-self: end; margin-top: 2px; }
+  #identity { grid-column: 1; grid-row: 2; font-size: 0.8rem; color: var(--muted); }
+  .who > a { grid-column: 2; grid-row: 2; justify-self: end; font-size: 0.9rem; white-space: nowrap; }
+}

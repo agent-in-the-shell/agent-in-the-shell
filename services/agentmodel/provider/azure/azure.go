@@ -1,4 +1,4 @@
-// Package azure implements agentmodel/provider.Provider for Azure OpenAI (#892).
+// Package azure implements agentmodel/provider.Provider for Azure OpenAI.
 //
 // Azure OpenAI is wire-compatible with OpenAI's /chat/completions (including SSE
 // streaming and the usage shape), differing only in (1) the URL layout —

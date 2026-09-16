@@ -39,6 +39,9 @@ type accountUsageResponse struct {
 type accountAuthInfo struct {
 	Mode       string `json:"mode,omitempty"`
 	ModeSource string `json:"mode_source,omitempty"`
+	// Plan is the subscription tier when the upstream reports one. The
+	// anthropic usage endpoint does not; the codex one does (plan_type).
+	Plan string `json:"plan,omitempty"`
 }
 
 type accountProbeError struct {
@@ -91,18 +94,7 @@ func (s *Server) anthropicUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Derive reset_in_seconds from the single report-wide anchor, mirroring
-	// /v1/limits and the agentshell consumer.
-	for i := range windows {
-		if windows[i].ResetAt == nil {
-			continue
-		}
-		secs := int64(windows[i].ResetAt.Sub(now).Round(time.Second).Seconds())
-		if secs < 0 {
-			secs = 0
-		}
-		windows[i].ResetInSeconds = &secs
-	}
+	fillResetInSeconds(windows, now)
 
 	writeJSON(w, http.StatusOK, accountUsageResponse{
 		Status:  rollupWindowStatus(windows),
@@ -146,4 +138,50 @@ func rollupWindowStatus(windows []limitWindow) string {
 		}
 	}
 	return limitStatusOK
+}
+
+// GET /v1/account/openai/usage — upstream OpenAI/Codex subscription usage.
+//
+// The sibling of anthropicUsage, and served here for the same reason: this
+// process owns the ChatGPT OAuth credential. A missing credential or an
+// upstream failure yields HTTP 200 with a structured error so the caller
+// renders a normal "unknown" row rather than treating it as a transport fault.
+func (s *Server) openaiUsage(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().UTC()
+	if s.chatgptAuth == nil {
+		writeUsageUnknown(w, codeCodexLoginRequired,
+			"no ChatGPT subscription credential is configured; run `agent-model chatgpt-login`")
+		return
+	}
+
+	base := s.openaiUsageBase
+	if base == "" {
+		base = auth.ChatGPTAPIBase
+	}
+	usage, err := fetchOpenAIUsage(r.Context(), s.openaiClient, base, s.chatgptAuth)
+	if err != nil {
+		code := codeCodexUsageUnavailable
+		if auth.IsLoginRequired(err) {
+			code = codeCodexLoginRequired
+		}
+		writeUsageUnknown(w, code, err.Error())
+		return
+	}
+
+	windows := openaiUsageWindows(usage, now)
+	if len(windows) == 0 {
+		writeUsageUnknown(w, codeCodexNoLimits, "Codex usage endpoint returned no limit windows.")
+		return
+	}
+	fillResetInSeconds(windows, now)
+
+	writeJSON(w, http.StatusOK, accountUsageResponse{
+		Status: rollupWindowStatus(windows),
+		Auth: &accountAuthInfo{
+			Mode:       agentmodel.AuthModeSubscription,
+			ModeSource: "agentmodel_oauth",
+			Plan:       usage.PlanType,
+		},
+		Windows: windows,
+	})
 }

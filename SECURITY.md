@@ -1,21 +1,30 @@
-# Security Policy
+# Security policy
 
-## Reporting a vulnerability
+## Reporting
 
-Please report security vulnerabilities **privately**. Do not open a public issue
-for a suspected vulnerability.
+Report suspected vulnerabilities privately through
+[GitHub private vulnerability reporting](https://github.com/agent-in-the-shell/agent-in-the-shell/security/advisories/new).
+Do not include credentials or private prompts in a public issue.
+If private reporting is unavailable, open an issue requesting a private contact
+without disclosing vulnerability details.
 
-- Use GitHub's [private vulnerability reporting](https://github.com/agent-in-the-shell/agent-in-the-shell/security/advisories/new).
-
-We aim to acknowledge reports within 3 business days and to provide a remediation
-timeline after triage.
+Maintainers triage reports and coordinate fixes and disclosure with the reporter.
 
 ## Supported versions
 
-Only the latest released version of each service receives security fixes.
+Only the latest released version receives security fixes.
 
-## Scope
+## Boundaries
 
-Each service is a single static Go binary with a deliberately small attack
-surface. Dependencies are audited with `govulncheck` in CI on every push, and
-the public build is verified to have zero private dependencies.
+- agent-model holds provider credentials. Protect its configuration, token
+  directories, audit database and optional content logs. Keep the master token
+  restricted to operators. The employee portal is disabled by default and
+  requires explicit identity and origin configuration.
+- agent-shell runs installed vendor CLIs with the caller's host permissions and
+  environment. It is not a sandbox. Prompts and agent output may be recorded in
+  its local process registry.
+- CI runs govulncheck before publishing. A passing dependency scan is not a
+  guarantee that application behavior is free of vulnerabilities.
+
+See [gateway security](docs/agentmodel.md) and
+[agent-shell security model](docs/agentshell.md#security-model) for details.

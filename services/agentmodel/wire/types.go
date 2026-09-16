@@ -252,9 +252,12 @@ type Choice struct {
 // rates per category. When a provider doesn't break out cache counts (no
 // caching support, or the response didn't hit the cache), both fields are 0.
 type Usage struct {
-	PromptTokens             int     `json:"prompt_tokens"`
-	CompletionTokens         int     `json:"completion_tokens"`
-	TotalTokens              int     `json:"total_tokens"`
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+	// ReasoningTokens is upstream-reported detail, not an additional charge or
+	// addend to TotalTokens. Nil means unknown; an explicit zero is preserved.
+	ReasoningTokens          *int    `json:"-"`
 	CacheCreationInputTokens int     `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int     `json:"cache_read_input_tokens,omitempty"`
 	CostUSD                  float64 `json:"cost_usd,omitempty"`
@@ -264,6 +267,20 @@ type Usage struct {
 	// key before falling back to the bare model id, so provider-specific models
 	// are metered instead of logged unpriced.
 	Provider string `json:"-"`
+}
+
+// Absorb returns next as the current usage while keeping the reported details
+// next did not carry. Providers emit ReasoningTokens on one usage frame and omit
+// it on later ones; every stream accumulator applies this one rule.
+func (u Usage) Absorb(next Usage) Usage {
+	if next.ReasoningTokens == nil {
+		next.ReasoningTokens = u.ReasoningTokens
+	}
+	return next
+}
+
+type completionTokensDetails struct {
+	ReasoningTokens *int `json:"reasoning_tokens,omitempty"`
 }
 
 type promptTokensDetails struct {
@@ -278,7 +295,8 @@ func (u Usage) MarshalJSON() ([]byte, error) {
 	type usageAlias Usage
 	out := struct {
 		usageAlias
-		PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details,omitempty"`
+		PromptTokensDetails     *promptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+		CompletionTokensDetails *completionTokensDetails `json:"completion_tokens_details,omitempty"`
 	}{usageAlias: usageAlias(u)}
 	if u.CacheReadInputTokens != 0 || u.CacheCreationInputTokens != 0 {
 		out.PromptTokensDetails = &promptTokensDetails{
@@ -286,7 +304,37 @@ func (u Usage) MarshalJSON() ([]byte, error) {
 			CacheWriteTokens: u.CacheCreationInputTokens,
 		}
 	}
+	if u.ReasoningTokens != nil {
+		out.CompletionTokensDetails = &completionTokensDetails{ReasoningTokens: u.ReasoningTokens}
+	}
 	return json.Marshal(out)
+}
+
+// UnmarshalJSON preserves the nested details on client/cache round trips.
+// Historical flat cache counts take precedence when both shapes are present.
+func (u *Usage) UnmarshalJSON(data []byte) error {
+	type usageAlias Usage
+	var in struct {
+		usageAlias
+		CompletionTokensDetails completionTokensDetails `json:"completion_tokens_details"`
+		PromptTokensDetails     promptTokensDetails     `json:"prompt_tokens_details"`
+		CacheRead               *int                    `json:"cache_read_input_tokens"`
+		CacheWrite              *int                    `json:"cache_creation_input_tokens"`
+	}
+	if err := json.Unmarshal(data, &in); err != nil {
+		return err
+	}
+	*u = Usage(in.usageAlias)
+	u.ReasoningTokens = in.CompletionTokensDetails.ReasoningTokens
+	u.CacheReadInputTokens = in.PromptTokensDetails.CachedTokens
+	u.CacheCreationInputTokens = in.PromptTokensDetails.CacheWriteTokens
+	if in.CacheRead != nil {
+		u.CacheReadInputTokens = *in.CacheRead
+	}
+	if in.CacheWrite != nil {
+		u.CacheCreationInputTokens = *in.CacheWrite
+	}
+	return nil
 }
 
 // EmbeddingRequest is the OpenAI-compatible embedding request.
@@ -331,3 +379,35 @@ const (
 	AuthModeAPIKey       = "api_key"
 	AuthModeSubscription = "subscription"
 )
+
+// StreamChunk is one `data:` frame of a streaming chat completion — the
+// OpenAI `chat.completion.chunk` shape the gateway emits from
+// POST /v1/chat/completions when the request sets Stream.
+//
+// It lives here rather than in the server's api package because a chunk is
+// half of the request/response contract: without an exported type a Go client
+// has nothing to decode into.
+type StreamChunk struct {
+	ID      string         `json:"id"`
+	Object  string         `json:"object"`
+	Created int64          `json:"created"`
+	Model   string         `json:"model"`
+	Choices []StreamChoice `json:"choices"`
+	// Usage is non-nil on whichever chunk the upstream provider attaches
+	// totals to (this gateway's OpenAI-compatible providers always request
+	// stream_options.include_usage — see provider/openai/openai.go — there is
+	// no caller-facing knob to turn it off) and nil on every other chunk.
+	// It is not guaranteed to land on the terminal chunk: when a stream ends
+	// without an upstream finish_reason, api/handlers_chat.go synthesizes a
+	// terminal chunk as a safety net, and that synthesized chunk carries no
+	// usage even if an earlier chunk already did.
+	Usage *Usage `json:"usage,omitempty"`
+}
+
+// StreamChoice is one choice's incremental update. Delta carries only the
+// fields that changed in this chunk, not the accumulated message.
+type StreamChoice struct {
+	Index        int     `json:"index"`
+	Delta        Message `json:"delta"`
+	FinishReason string  `json:"finish_reason,omitempty"`
+}

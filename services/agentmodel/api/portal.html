@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>agent-model</title>
+<style nonce="{{NONCE}}">
+{{SHARED_CSS}}
+/* Personal page: snippet colors, chips, calendar heatmap and the client section. */
+.syntax-comment { color: var(--muted); }
+.syntax-string { color: var(--ok); }
+.syntax-keyword { color: var(--accent); }
+.syntax-number { color: var(--warn); }
+.syntax-variable { color: var(--accent); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.chips li { font-family: var(--mono); font-size: 0.85rem; padding: 3px 9px; background: var(--glass); box-shadow: inset 0 0 0 1px var(--line); overflow-wrap: anywhere; }
+.empty { margin: 8px 0 0; padding: 8px 12px; border-left: 3px solid var(--line); background: var(--glass); color: var(--muted); max-width: var(--measure); }
+
+.secret { margin-top: var(--pitch); padding: 14px; border-left: 3px solid var(--warn); background: var(--glass); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); color: var(--ink); }
+.secret pre { margin: 10px 0; padding: 10px 12px; background: var(--card); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.95rem; user-select: all; }
+
+/* Calendar heatmap. Cell geometry equals the paper pitch, so the grid reads as ruled. */
+.scroll { overflow-x: auto; padding: 0 0 4px; }
+.calendar-layout { display: flex; gap: 8px; width: max-content; }
+.weekdays { display: grid; grid-template-rows: 20px repeat(7, 14px); gap: 4px; font-size: 11px; color: var(--muted); }
+.months { display: grid; grid-auto-columns: 18px; grid-auto-flow: column; height: 24px; font-size: 11px; color: var(--muted); }
+.months span { overflow: visible; white-space: nowrap; }
+.heatmap { display: grid; grid-template-rows: repeat(7, 14px); grid-auto-columns: 14px; grid-auto-flow: column; gap: 4px; padding: 0 3px 3px 0; }
+.day, .swatch { --fill: var(--lvl0); width: 14px; height: 14px; border: 1px solid var(--cell-border); border-radius: 3px; background: var(--fill); }
+.day { padding: 0; margin: 0; display: block; min-height: 0; cursor: pointer; }
+.day:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; position: relative; z-index: 1; }
+.level1 { --fill: var(--lvl1); }
+.level2 { --fill: var(--lvl2); }
+.level3 { --fill: var(--lvl3); }
+.level4 { --fill: var(--lvl4); }
+.day:disabled, .future { background: transparent; border: 1px dashed var(--line); cursor: default; opacity: 1; }
+.calendar-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 24px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0; padding: 0; list-style: none; font-size: 12px; color: var(--muted); }
+.legend li { display: flex; align-items: center; gap: 5px; }
+.swatch { display: inline-block; flex-shrink: 0; }
+
+/* Client integration: facts row, model picker, tabs, stacked copyable blocks. */
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 12px calc(var(--pitch) * 2); margin: 0 0 var(--pitch); }
+.facts > div { padding-top: 6px; }
+.facts dt { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.facts dd { margin: 4px 0 0; overflow-wrap: anywhere; font-size: 0.9rem; }
+.model-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0 0 var(--pitch); padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--glass); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.model-pick label { font-weight: 600; }
+.model-pick small { flex-basis: 100%; }
+.tabs { display: flex; gap: 24px; overflow-x: auto; margin: calc(var(--pitch) * 1.5) 0 0; padding: 0; scrollbar-width: thin; }
+.tabs button { flex: 0 0 auto; min-height: 36px; padding: 4px 0; border-bottom: 3px solid transparent; color: var(--muted); font-size: 0.95rem; }
+.tabs button:hover:not(:disabled) { color: var(--ink); }
+.tabs button[aria-selected="true"] { border-bottom-color: var(--ink); color: var(--ink); font-weight: 650; }
+.panel { padding: var(--pitch) 0 0; }
+.panel h3 { margin: var(--pitch) 0 6px; }
+.panel h3:first-child { margin-top: 0; }
+.block { position: relative; margin: 6px 0 var(--pitch); background: var(--glass); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.block-head { position: absolute; top: 6px; right: 6px; display: flex; align-items: center; gap: 10px; font-size: 0.74rem; color: var(--muted); }
+.block-head .file { font-family: var(--mono); }
+.block pre { margin: 0; padding: 12px 120px 12px 12px; overflow-x: auto; font-size: 0.86rem; line-height: 1.45; tab-size: 4; }
+
+@media (max-width: 640px) {
+  main { gap: calc(var(--pitch) * 3); }
+  .block pre { padding-right: 12px; padding-top: 34px; }
+}
+</style>
+
+<header class="top">
+  <div class="brand">
+    <span class="eyebrow">powered by GliaCloud</span>
+    <h1>agent-model</h1>
+  </div>
+  <div class="who">
+    <span id="identity">Verifying your session…</span>
+    <a id="admin" href="/portal/admin/" hidden>Admin monitor</a>
+    <div class="theme" role="group" aria-label="Color theme">
+      <button type="button" data-theme-choice="system" aria-pressed="true">Auto</button>
+      <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+      <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="row">
+    <section class="card" aria-labelledby="key-title">
+      <div class="card-head">
+        <h2 id="key-title"><span class="num">01 · KEY</span>Your key <span id="key-state" class="badge neutral">checking</span></h2>
+        <div class="actions">
+          <button type="button" id="create" class="primary" hidden>Create key</button>
+          <button type="button" id="rotate" hidden>Rotate key</button>
+        </div>
+      </div>
+      <p id="key-summary">Verifying your session…</p>
+      <div id="secret" class="secret" hidden>
+        <strong>Copy this key now. It is displayed only once and never stored by this page.</strong>
+        <pre id="token"></pre>
+        <div class="actions">
+          <button type="button" id="copy-token" class="primary">Copy key</button>
+          <button type="button" id="hide">Dismiss key</button>
+        </div>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <p class="footnote">New keys allow no models until an administrator authorizes them. Rotating invalidates the previous key immediately.</p>
+    </section>
+
+    <section class="card" aria-labelledby="policy-title">
+      <div class="card-head">
+        <h2 id="policy-title"><span class="num">02 · POLICY</span>Access policy</h2>
+        <small id="policy-hint" class="hint">Enforced by the gateway on every request.</small>
+      </div>
+      <dl id="policy-ledger" class="ledger" hidden>
+        <div><dt>Status</dt><dd id="policy-status" class="text">—</dd></div>
+        <div><dt>Key ID</dt><dd id="policy-keyid" class="text mono">—</dd></div>
+        <div><dt>Budget</dt><dd id="policy-budget" class="text">—</dd></div>
+        <div><dt>Expiry</dt><dd id="policy-expiry" class="text">—</dd></div>
+      </dl>
+      <h3 id="models-title">Authorized models</h3>
+      <ul id="models" class="chips" aria-labelledby="models-title"></ul>
+      <p id="models-empty" class="empty">No key yet. The model list appears after you create one.</p>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="usage-title">
+    <div class="card-head">
+      <h2 id="usage-title"><span class="num">03 · USAGE</span>Personal token usage</h2>
+      <div class="actions"><button type="button" id="refresh">Refresh</button></div>
+    </div>
+    <div id="usage" hidden>
+      <h3>Past rolling 30 days</h3>
+      <dl class="ledger totals">
+        <div><dt>Requests</dt><dd id="requests">0</dd></div>
+        <div><dt>Input tokens</dt><dd id="input">0</dd></div>
+        <div><dt>Output tokens</dt><dd id="output">0</dd></div>
+        <div><dt>Total tokens</dt><dd id="total">0</dd></div>
+      </dl>
+      <div class="calendar-head">
+        <h3 id="calendar-title">Calendar year · Asia/Taipei (UTC+8)</h3>
+        <ul class="legend" aria-label="Daily total token color scale">
+          <li><span class="swatch"></span>0</li>
+          <li><span class="swatch level1"></span>1–999</li>
+          <li><span class="swatch level2"></span>1,000–9,999</li>
+          <li><span class="swatch level3"></span>10,000–99,999</li>
+          <li><span class="swatch level4"></span>100,000+</li>
+          <li><span class="swatch future"></span>Future (blank)</li>
+        </ul>
+      </div>
+      <div class="chart">
+        <div class="scroll" tabindex="0" role="region" aria-labelledby="calendar-title">
+          <div class="calendar-layout">
+            <div class="weekdays" aria-hidden="true"><span></span><span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span></div>
+            <div>
+              <div id="months" class="months" aria-hidden="true"></div>
+              <div id="calendar" class="heatmap" role="group" aria-labelledby="calendar-title"></div>
+            </div>
+          </div>
+        </div>
+        <div id="day-tip" class="tip" role="tooltip" hidden><b id="day-tip-title"></b><dl id="day-tip-rows"></dl></div>
+      </div>
+      <p class="footnote">Retained request logs only, in Asia/Taipei (UTC+8). Zero means no recorded tokens, not proof of no usage.</p>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="connect-title">
+    <div class="card-head">
+      <h2 id="connect-title"><span class="num">04 · CONNECT</span>Connect a client</h2>
+    </div>
+    <dl class="facts">
+      <div><dt>Base URL · OpenAI-compatible</dt><dd><code id="fact-v1"></code></dd></div>
+      <div><dt>Base URL · Claude Code</dt><dd><code id="fact-host"></code></dd></div>
+    </dl>
+    <div class="model-pick">
+      <label for="model-select">Model</label>
+      <select id="model-select" disabled><option value="">Authorization required</option></select>
+      <small id="model-hint">No models are authorized yet. Ask an administrator.</small>
+    </div>
+
+    <h3>Environment variables</h3>
+    <p><small>Every setup below reads this variable. The model is written into the example; pick it above.</small></p>
+    <div class="block" data-snippet="env"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+
+    <div class="tabs" role="tablist" aria-label="Client setup">
+      <button type="button" role="tab" id="tab-claude" aria-controls="panel-claude" aria-selected="true">Claude Code</button>
+      <button type="button" role="tab" id="tab-codex" aria-controls="panel-codex" aria-selected="false" tabindex="-1">Codex</button>
+      <button type="button" role="tab" id="tab-pi" aria-controls="panel-pi" aria-selected="false" tabindex="-1">pi</button>
+      <button type="button" role="tab" id="tab-ts" aria-controls="panel-ts" aria-selected="false" tabindex="-1">TypeScript</button>
+      <button type="button" role="tab" id="tab-py" aria-controls="panel-py" aria-selected="false" tabindex="-1">Python</button>
+      <button type="button" role="tab" id="tab-go" aria-controls="panel-go" aria-selected="false" tabindex="-1">Go</button>
+      <button type="button" role="tab" id="tab-rs" aria-controls="panel-rs" aria-selected="false" tabindex="-1">Rust</button>
+    </div>
+
+    <div class="panel" id="panel-claude" role="tabpanel" aria-labelledby="tab-claude">
+      <h3>Option A · Environment variables</h3>
+      <div class="block" data-snippet="claude-launch"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <h3>Option B · Settings file</h3>
+      <p><small>Persistent; no exports needed. Replace the key placeholder and remove any <code>ANTHROPIC_API_KEY</code> from your shell.</small></p>
+      <div class="block" data-snippet="claude-settings"><div class="block-head"><span class="file">~/.claude/settings.json</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <div class="block" data-snippet="claude-run"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <p><small>Pick a Claude model. Run <code>/status</code> inside Claude Code to confirm the base URL.</small></p>
+    </div>
+
+    <div class="panel" id="panel-codex" role="tabpanel" aria-labelledby="tab-codex" hidden>
+      <h3>Configuration</h3>
+      <div class="block" data-snippet="codex-toml"><div class="block-head"><span class="file">~/.codex/config.toml</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <h3>Launch</h3>
+      <div class="block" data-snippet="codex-launch"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <p><small>Pick a model that supports the Responses API.</small></p>
+    </div>
+
+    <div class="panel" id="panel-pi" role="tabpanel" aria-labelledby="tab-pi" hidden>
+      <h3>Configuration</h3>
+      <p><small>One entry per authorized model. Add <code>"reasoning": true</code> for thinking models; <code>contextWindow</code> and <code>maxTokens</code> default to 128k and 16k.</small></p>
+      <div class="block" data-snippet="pi-json"><div class="block-head"><span class="file">~/.pi/agent/models.json</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <h3>Launch</h3>
+      <div class="block" data-snippet="pi-launch"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+    </div>
+
+    <div class="panel" id="panel-ts" role="tabpanel" aria-labelledby="tab-ts" hidden>
+      <h3>Setup</h3>
+      <div class="block" data-snippet="ts-setup"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <h3>Code</h3>
+      <div class="block" data-snippet="ts-code"><div class="block-head"><span class="file">example.ts</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <h3>Run</h3>
+      <div class="block" data-snippet="ts-run"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+    </div>
+
+    <div class="panel" id="panel-py" role="tabpanel" aria-labelledby="tab-py" hidden>
+      <h3>Code</h3>
+      <div class="block" data-snippet="py-code"><div class="block-head"><span class="file">example.py</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <h3>Run</h3>
+      <div class="block" data-snippet="py-run"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+    </div>
+
+    <div class="panel" id="panel-go" role="tabpanel" aria-labelledby="tab-go" hidden>
+      <h3>Setup</h3>
+      <div class="block" data-snippet="go-setup"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <h3>Code</h3>
+      <div class="block" data-snippet="go-code"><div class="block-head"><span class="file">main.go</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <h3>Run</h3>
+      <div class="block" data-snippet="go-run"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+    </div>
+
+    <div class="panel" id="panel-rs" role="tabpanel" aria-labelledby="tab-rs" hidden>
+      <h3>Setup</h3>
+      <div class="block" data-snippet="rs-setup"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <h3>Code</h3>
+      <div class="block" data-snippet="rs-code"><div class="block-head"><span class="file">src/main.rs</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+      <h3>Run</h3>
+      <div class="block" data-snippet="rs-run"><div class="block-head"><span>Shell</span><button type="button" class="small copy">Copy</button></div><pre></pre></div>
+    </div>
+
+    <p class="footnote">401: check the key. 403: model not authorized. 429: quota. 404: URL or model.</p>
+  </section>
+</main>
+
+<script nonce="{{NONCE}}">
+'use strict';
+{{SHARED_JS}}
+let csrf = '', revision = 0;
+
+// The gateway base the examples name. /portal/api/me reports the configured
+// portal.gateway_origin; otherwise use the current page's origin.
+let GATEWAY_ORIGIN = location.origin;
+let GATEWAY_V1 = GATEWAY_ORIGIN + '/v1';
+function setGatewayOrigin(origin) {
+  if (origin) { GATEWAY_ORIGIN = origin; GATEWAY_V1 = origin + '/v1'; }
+  $('fact-v1').textContent = GATEWAY_V1;
+  $('fact-host').textContent = GATEWAY_ORIGIN;
+}
+const PLACEHOLDER = 'YOUR_AUTHORIZED_MODEL_ID';
+Object.assign(ERRORS, {
+  admin_required: 'This action requires an administrator.',
+  migration_required: 'A key with your email already exists outside the portal. Ask your administrator to migrate it.',
+  unsupported_key_policy: 'Your key has a budget or expiry, which this page cannot rotate. Contact your administrator.',
+  revision_conflict: 'Your key changed elsewhere. Refresh and retry.',
+  key_unavailable: 'The key no longer exists. Refresh to see the current state.'
+});
+const setStatus = (message, tone, code) => announce('status', message, tone, code);
+
+/* Usage calendar. Renders the Taipei year from data.calendar; nil counts are future days. */
+function tokenLevel(tokens) { return tokens >= 100000 ? 4 : tokens >= 10000 ? 3 : tokens >= 1000 ? 2 : tokens > 0 ? 1 : 0; }
+function renderUsage(data) {
+  const stats = data.stats;
+  setFigure($('requests'), stats.request_count);
+  setFigure($('input'), stats.prompt_tokens);
+  setFigure($('output'), stats.completion_tokens);
+  setFigure($('total'), stats.total_tokens);
+  const calendar = data.calendar;
+  $('calendar-title').textContent = calendar.year + ' · ' + PORTAL_TIME_LABEL + ' calendar year';
+  const grid = $('calendar'), months = $('months');
+  const cells = document.createDocumentFragment(), labels = document.createDocumentFragment();
+  hideDayTip();
+  // Date-only calendar arithmetic: UTC getters avoid browser-zone shifts.
+  const offset = new Date(calendar.days[0].date + 'T00:00:00Z').getUTCDay();
+  for (let i = 0; i < offset; i++) {
+    const spacer = document.createElement('span');
+    spacer.setAttribute('aria-hidden', 'true');
+    cells.append(spacer);
+  }
+  calendar.days.forEach((day, index) => {
+    const date = new Date(day.date + 'T00:00:00Z');
+    if (date.getUTCDate() === 1) {
+      const label = document.createElement('span');
+      label.textContent = date.toLocaleString('en-US', {month: 'short', timeZone: 'UTC'});
+      label.style.gridColumn = String(Math.floor((offset + index) / 7) + 1);
+      labels.append(label);
+    }
+    const cell = document.createElement('button');
+    cell.type = 'button';
+    cell.className = 'day';
+    if (day.total_tokens === null) {
+      cell.disabled = true;
+      cell.title = day.date + ' ' + PORTAL_TIME_LABEL + ' — future date';
+    } else {
+      cell.classList.add('level' + tokenLevel(day.total_tokens));
+      const label = day.date + ' ' + PORTAL_TIME_LABEL + ': ' + number(day.total_tokens) + ' total tokens, ' + number(day.requests) + ' requests' + (day.requests === 0 ? ' (no retained records)' : '');
+      cell.setAttribute('aria-label', label);
+      cell.onfocus = () => showDayTip(cell, day);
+      cell.onblur = hideDayTip;
+      if (HOVERABLE) { cell.onmouseenter = () => showDayTip(cell, day); cell.onmouseleave = hideDayTip; }
+      else cell.onclick = () => showDayTip(cell, day);
+    }
+    if (cell.disabled) cell.setAttribute('aria-label', cell.title);
+    cells.append(cell);
+  });
+  grid.replaceChildren(cells);
+  months.replaceChildren(labels);
+  $('usage').hidden = false;
+}
+
+/* Day tooltip. Shown on hover and on keyboard focus, or on tap where nothing can hover. */
+function showDayTip(cell, day) {
+  const tip = $('day-tip'), rows = $('day-tip-rows');
+  $('day-tip-title').textContent = day.date + ' ' + PORTAL_TIME_LABEL;
+  rows.replaceChildren();
+  for (const [label, value] of [['Requests', number(day.requests)], ['Total tokens', number(day.total_tokens)]]) {
+    const dt = document.createElement('dt'), dd = document.createElement('dd');
+    dt.textContent = label; dd.textContent = value; rows.append(dt, dd);
+  }
+  if (day.requests === 0) {
+    const dt = document.createElement('dt'); dt.textContent = 'No retained records'; dt.style.gridColumn = '1 / -1'; rows.append(dt);
+  }
+  placeTip(tip, cell, 90);
+}
+function hideDayTip() { $('day-tip').hidden = true; }
+
+/* Key state and policy. Budget/expiry come straight from the key record; null means none. */
+const STATES = {
+  unissued: {label: 'not created', tone: 'neutral', summary: 'You have no gateway key yet. Create one to receive a one-time secret.'},
+  active: {label: 'active', tone: 'ok', summary: 'Your key is issued. Rotate it if the secret was lost or exposed.'},
+  disabled: {label: 'disabled', tone: 'warn', summary: 'Your key is temporarily paused. Rotation does not enable it; contact your administrator.'},
+  expired: {label: 'expired', tone: 'warn', summary: 'Your key has expired. Contact your administrator.'},
+  revoked: {label: 'revoked', tone: 'danger', summary: 'This credential is permanently retired. Replace it with a new secret, then ask your administrator to grant models again. History is preserved.'}
+};
+function setBadge(element, label, tone) {
+  element.textContent = label;
+  element.className = 'badge ' + tone;
+}
+function describeBudget(key) {
+  if (key.max_budget === null || key.max_budget === undefined) return 'None';
+  const window = key.budget_duration ? ' per ' + key.budget_duration : ' lifetime';
+  return 'USD ' + number(key.max_budget) + window;
+}
+function describeExpiry(key) {
+  if (!key.expires_at) return 'None';
+  return stamp(key.expires_at) + ' ' + PORTAL_TIME_LABEL;
+}
+function renderPolicy(data) {
+  const state = STATES[data.state] || {label: data.state, tone: 'neutral', summary: 'Unknown key state.'};
+  setBadge($('key-state'), state.label, state.tone);
+  $('key-summary').textContent = state.summary;
+  $('create').hidden = data.state !== 'unissued';
+  $('rotate').hidden = !data.key || !['active', 'disabled', 'revoked'].includes(data.state);
+  $('rotate').textContent = data.state === 'revoked' ? 'Replace revoked key' : 'Rotate key';
+  const models = $('models');
+  models.replaceChildren();
+  const key = data.key;
+  $('policy-ledger').hidden = !key;
+  if (key) {
+    $('policy-status').textContent = data.state === 'revoked' ? 'Revoked' : key.disabled ? 'Disabled' : state.label[0].toUpperCase() + state.label.slice(1);
+    $('policy-keyid').textContent = data.binding && data.binding.key_id ? data.binding.key_id : '—';
+    $('policy-budget').textContent = describeBudget(key);
+    $('policy-expiry').textContent = describeExpiry(key);
+  }
+  const list = key ? key.models : [];
+  for (const model of list) {
+    const item = document.createElement('li');
+    item.textContent = model;
+    models.append(item);
+  }
+  const empty = $('models-empty');
+  empty.hidden = list.length > 0;
+  if (!key) empty.textContent = data.state === 'revoked' ? 'This retired key has no recoverable credential; contact your administrator.' : 'No key yet. The model list appears after you create one.';
+  else if (key.disabled || data.state === 'revoked') empty.textContent = 'Key inactive. Inference is denied regardless of models.';
+  else empty.textContent = 'No models authorized. Inference is denied until your administrator grants access.';
+  if (key && key.disabled && data.state !== 'revoked') setBadge($('key-state'), 'disabled', 'warn');
+}
+
+/* Client examples. Model IDs are inserted only inside single quotes and only when they
+   match a strict allowlist; anything else keeps the placeholder rather than shell syntax. */
+const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
+function shellModel(model, fallback) {
+  return SAFE_MODEL.test(model || '') ? model : fallback;
+}
+const SNIPPETS = {
+  env: () => [
+    "export AGENT_MODEL_API_KEY='YOUR_GATEWAY_KEY'"
+  ].join('\n'),
+  'ts-setup': () => [
+    'mkdir agent-model-ts-demo',
+    'cd agent-model-ts-demo',
+    'npm init -y',
+    'npm install openai',
+    'npm install --save-dev tsx typescript @types/node'
+  ].join('\n'),
+  'ts-code': m => `import OpenAI from "openai";
+import process from "node:process";
+
+async function main() {
+  const client = new OpenAI({
+    apiKey: process.env.AGENT_MODEL_API_KEY,
+    baseURL: "${GATEWAY_V1}",
+  });
+  const result = await client.chat.completions.create({
+    model: "${shellModel(m, PLACEHOLDER)}",
+    messages: [{ role: "user", content: "Say hello in one sentence." }],
+  });
+  console.log(result.choices[0].message.content);
+}
+
+main();`,
+  'ts-run': () => 'npx tsx example.ts',
+  'py-code': m => `# /// script
+# requires-python = ">=3.11"
+# dependencies = ["openai"]
+# ///
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["AGENT_MODEL_API_KEY"],
+    base_url="${GATEWAY_V1}",
+)
+result = client.chat.completions.create(
+    model="${shellModel(m, PLACEHOLDER)}",
+    messages=[{"role": "user", "content": "Say hello in one sentence."}],
+)
+print(result.choices[0].message.content)`,
+  'py-run': () => 'uv run example.py',
+  'go-setup': () => [
+    'mkdir agent-model-go-demo',
+    'cd agent-model-go-demo',
+    'go mod init agent-model-go-demo',
+    'go get github.com/openai/openai-go/v3'
+  ].join('\n'),
+  'go-code': m => `package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+)
+
+func main() {
+	client := openai.NewClient(
+		option.WithAPIKey(os.Getenv("AGENT_MODEL_API_KEY")),
+		option.WithBaseURL("${GATEWAY_V1}"),
+	)
+	result, err := client.Chat.Completions.New(context.Background(), openai.ChatCompletionNewParams{
+		Model:    "${shellModel(m, PLACEHOLDER)}",
+		Messages: []openai.ChatCompletionMessageParamUnion{openai.UserMessage("Say hello in one sentence.")},
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(result.Choices[0].Message.Content)
+}`,
+  'go-run': () => 'go run main.go',
+  'rs-setup': () => [
+    'cargo new --bin agent-model-rust-demo',
+    'cd agent-model-rust-demo',
+    'cargo add async-openai --features chat-completion',
+    'cargo add tokio --features macros,rt-multi-thread'
+  ].join('\n'),
+  'rs-code': m => `use async_openai::{
+    config::OpenAIConfig,
+    types::chat::{ChatCompletionRequestUserMessage, CreateChatCompletionRequestArgs},
+    Client,
+};
+use std::{env, error::Error};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let config = OpenAIConfig::new()
+        .with_api_key(env::var("AGENT_MODEL_API_KEY")?)
+        .with_api_base("${GATEWAY_V1}");
+    let client = Client::with_config(config);
+    let request = CreateChatCompletionRequestArgs::default()
+        .model("${shellModel(m, PLACEHOLDER)}")
+        .messages([ChatCompletionRequestUserMessage::from("Say hello in one sentence.").into()])
+        .build()?;
+    let response = client.chat().create(request).await?;
+    println!("{}", response.choices[0].message.content.as_deref().unwrap_or_default());
+    Ok(())
+}`,
+  'rs-run': () => 'cargo run',
+  'claude-launch': m => [
+    "export ANTHROPIC_BASE_URL='" + GATEWAY_ORIGIN + "'",
+    'export ANTHROPIC_AUTH_TOKEN="$AGENT_MODEL_API_KEY"',
+    'unset ANTHROPIC_API_KEY',
+    "claude --model '" + shellModel(m, PLACEHOLDER) + "'"
+  ].join('\n'),
+  'claude-settings': m => JSON.stringify({
+    env: {ANTHROPIC_BASE_URL: GATEWAY_ORIGIN, ANTHROPIC_AUTH_TOKEN: 'YOUR_GATEWAY_KEY'},
+    model: shellModel(m, PLACEHOLDER)
+  }, null, 2),
+  'claude-run': () => 'claude',
+  'codex-toml': () => `[model_providers.agent_model]
+name = "Agent Model"
+base_url = "${GATEWAY_V1}"
+env_key = "AGENT_MODEL_API_KEY"
+wire_api = "responses"`,
+  'codex-launch': m => 'codex --config \'model_provider="agent_model"\' --model \'' + shellModel(m, PLACEHOLDER) + "'",
+  'pi-json': m => piModelsJSON(m),
+  'pi-launch': m => "pi --model 'agent-model/" + shellModel(m, PLACEHOLDER) + "'"
+};
+/* pi reads custom providers from models.json; apiKey accepts a $ENV reference, so the file
+   never holds the secret. Only id is required per model: pi defaults contextWindow to 128k
+   and maxTokens to 16k, and the gateway accepts pi's default request shape as is. */
+let authorizedModels = [];
+function piModelsJSON(selected) {
+  const safe = authorizedModels.filter(id => SAFE_MODEL.test(id));
+  const ids = safe.length ? safe : [shellModel(selected, PLACEHOLDER)];
+  const provider = {
+    baseUrl: GATEWAY_V1,
+    api: 'openai-completions',
+    apiKey: '$AGENT_MODEL_API_KEY',
+    models: ids.map(id => ({id}))
+  };
+  return JSON.stringify({providers: {'agent-model': provider}}, null, 2);
+}
+// Deliberately lexical, not a parser. Never interpret snippet text as HTML.
+const SYNTAX_TOKENS = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|#[^\n]*|\/\/[^\n]*|\$\{[^}\n]*\}|\$[A-Za-z_][\w]*|\b\d[\d_]*(?:\.\d+)?\b|\b[A-Za-z_]\w*\b/g;
+const SYNTAX_KEYWORDS = new Set(('import from async function const let await new if else throw return package func var defer struct map string any nil use fn dyn true false None True False as with try except not or is export unset read printf bash mkdir cd npm npx uv go cargo set claude codex pi').split(' '));
+function highlightSnippet(pre, source, name) {
+  const shell = !name.endsWith('-code') && !name.endsWith('-toml') && !name.endsWith('-json') && name !== 'claude-settings';
+  const hashComments = shell || name === 'py-code' || name.endsWith('-toml');
+  const append = (parent, text, kind) => {
+    if (!kind) { parent.append(document.createTextNode(text)); return; }
+    const span = document.createElement('span');
+    span.className = 'syntax-' + kind;
+    span.textContent = text;
+    parent.append(span);
+  };
+  pre.replaceChildren();
+  let end = 0;
+  for (const match of source.matchAll(SYNTAX_TOKENS)) {
+    append(pre, source.slice(end, match.index));
+    const text = match[0];
+    const kind = /^["'`]/.test(text) ? 'string'
+      : (hashComments ? text.startsWith('#') : text.startsWith('//')) ? 'comment'
+      : shell && text.startsWith('$') ? 'variable'
+      : /^\d/.test(text) ? 'number'
+      : SYNTAX_KEYWORDS.has(text) ? 'keyword' : '';
+    if (shell && text.startsWith('"')) {
+      // Shell expansions remain visible inside double quotes, but not single quotes.
+      let start = 0;
+      for (const variable of text.matchAll(/\$\{[^}\n]*\}|\$[A-Za-z_]\w*/g)) {
+        append(pre, text.slice(start, variable.index), 'string');
+        append(pre, variable[0], 'variable');
+        start = variable.index + variable[0].length;
+      }
+      append(pre, text.slice(start), 'string');
+    } else append(pre, text, kind);
+    end = match.index + text.length;
+  }
+  append(pre, source.slice(end));
+}
+function renderSnippets(model) {
+  for (const block of document.querySelectorAll('[data-snippet]')) {
+    const name = block.getAttribute('data-snippet');
+    const render = SNIPPETS[name];
+    if (render) highlightSnippet(block.querySelector('pre'), render(model), name);
+  }
+}
+function renderModelPicker(models) {
+  const select = $('model-select');
+  const current = select.value;
+  select.replaceChildren();
+  if (!models.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'Authorization required';
+    select.append(option);
+    select.disabled = true;
+    authorizedModels = [];
+    $('model-hint').textContent = 'No models are authorized yet. Ask an administrator.';
+    renderSnippets('');
+    return;
+  }
+  for (const model of models) {
+    const option = document.createElement('option');
+    option.value = model;
+    option.textContent = model;
+    select.append(option);
+  }
+  select.disabled = false;
+  select.value = models.includes(current) ? current : models[0];
+  authorizedModels = models.slice();
+  $('model-hint').textContent = 'Models authorized for your key.';
+  renderSnippets(select.value);
+}
+function initConnect() {
+  setGatewayOrigin('');
+  $('model-select').onchange = () => renderSnippets($('model-select').value);
+  if (!HOVERABLE) document.addEventListener('click', event => { if (!event.target.closest('#calendar')) hideDayTip(); });
+  const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+  const select = tab => {
+    for (const other of tabs) {
+      const active = other === tab;
+      other.setAttribute('aria-selected', String(active));
+      other.tabIndex = active ? 0 : -1;
+      $(other.getAttribute('aria-controls')).hidden = !active;
+    }
+  };
+  tabs.forEach((tab, index) => {
+    tab.onclick = () => select(tab);
+    tab.onkeydown = event => {
+      const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+      if (!step) return;
+      event.preventDefault();
+      const next = tabs[(index + step + tabs.length) % tabs.length];
+      select(next);
+      next.focus();
+    };
+  });
+  for (const button of document.querySelectorAll('.copy')) {
+    button.onclick = () => copyText(button, button.closest('.block').querySelector('pre').textContent);
+  }
+  renderSnippets('');
+}
+
+/* Session flow. The secret is only ever placed in #token and cleared on dismiss/pagehide. */
+async function refresh() {
+  const data = await api('/portal/api/me?timezone=' + encodeURIComponent(PORTAL_TIMEZONE));
+  csrf = data.csrf_token;
+  revision = data.binding?.revision || 0;
+  $('identity').textContent = data.email;
+  $('admin').hidden = !data.is_admin;
+  setGatewayOrigin(data.gateway_origin);
+  renderPolicy(data);
+  renderModelPicker(data.key && Array.isArray(data.key.models) ? data.key.models : []);
+  renderUsage(data);
+}
+function clearSecret() {
+  $('secret').hidden = true;
+  $('token').textContent = '';
+}
+async function mutate(rotate) {
+  if (rotate && !confirm('Issue a fresh secret? Existing clients must be updated. If this replaces a revoked credential, it starts with no model grants; the old secret stays permanently invalid.')) return;
+  $('create').disabled = $('rotate').disabled = true;
+  clearSecret();
+  setStatus('Working…', 'info');
+  try {
+    const data = await api('/portal/api/key' + (rotate ? '/rotate' : ''), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+      body: JSON.stringify(rotate ? {revision} : {})
+    });
+    $('token').textContent = data.key;
+    $('secret').hidden = false;
+    setStatus('Key issued. Save it in your client or password manager.', 'ok');
+    await refresh();
+  } catch (error) {
+    setStatus(error.message + ' Refresh before retrying; an interrupted response may still have changed the key.', 'error', error.code);
+  } finally {
+    $('create').disabled = $('rotate').disabled = false;
+  }
+}
+function init() {
+  initTheme();
+  initConnect();
+  $('refresh').onclick = async () => {
+    $('refresh').disabled = true;
+    try {
+      await refresh();
+      setStatus('Usage refreshed.', 'ok');
+    } catch (error) {
+      $('usage').hidden = true;
+      setStatus(error.message, 'error', error.code);
+    } finally {
+      $('refresh').disabled = false;
+    }
+  };
+  $('create').onclick = () => mutate(false);
+  $('rotate').onclick = () => mutate(true);
+  $('hide').onclick = clearSecret;
+  $('copy-token').onclick = () => copyText($('copy-token'), $('token').textContent);
+  window.addEventListener('pagehide', clearSecret);
+  refresh().catch(error => {
+    $('identity').textContent = error.code === 'access_assertion_required' ? 'Not signed in' : 'Session unavailable';
+    $('key-summary').textContent = 'The page could not load your key state.';
+    setBadge($('key-state'), 'unavailable', 'danger');
+    setStatus(error.message, 'error', error.code);
+  });
+}
+init();
+</script>
+</html>

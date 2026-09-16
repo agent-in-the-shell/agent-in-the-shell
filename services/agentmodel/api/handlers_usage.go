@@ -12,7 +12,7 @@ import (
 
 // codeInvalidParameter and codeUsageReportFailed are the usage-endpoint error
 // codes; they predate the shared code vocabulary and stay local to keep the
-// wire output byte-identical (#705 only removes empty codes, never renames).
+// wire output byte-identical (this only removes empty codes, never renames).
 const (
 	codeInvalidParameter  = "invalid_parameter"
 	codeUsageReportFailed = "usage_report_failed"

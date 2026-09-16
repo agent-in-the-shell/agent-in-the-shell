@@ -9,14 +9,13 @@ request/response bodies.
 
 Source: `services/agentmodel/`
 
-> agent-model is the LLM-gateway layer of a wider agent tool family (agent-pi
-> coding agent, agent-shell launcher, agent-run def runner — released in later
-> waves). It is infrastructure: the thing other tools call to talk to an LLM.
+> agent-model serves inference to HTTP clients. agent-shell independently runs
+> installed coding-agent CLIs; it does not route their inference through this gateway.
 
 ## Build
 
 ```
-go build -o agent-model ./cmd/agent-model
+go build -o build/ ./cmd/agent-model
 ```
 
 ## Commands
@@ -36,25 +35,99 @@ agent-model profile show [--json]
 agent-model profile remove <name> [--force] [--missing-ok]
 agent-model profile migrate [--dry-run]
                                       manage Anthropic OAuth profiles
-agent-model filter [--url <url>] [--model <name>] "<system-prompt>"
-                                      read JSONL from stdin, rewrite the text field, emit JSONL
+agent-model prompt [--model <name>] [--timeout <dur>] ["<prompt>"]
+                                      debug: send one prompt through the gateway ($AGENT_MODEL_URL,
+                                      $AGENT_MODEL_TOKEN) and print the reply; proves the model is
+                                      online (exit 1 if not). Without an argument it sends a tiny
+                                      built-in liveness prompt; model/latency/token counts go to
+                                      stderr
 agent-model usage [--config <path>] [--db <path>] [--since 7d] [--by model] [--org default] [--limit N] [--json]
                                       report request_logs usage: requests, tokens, cost, error_rate;
                                       resolves the DB from --db, --config, or the default config
                                       path (--db wins when both are set)
+agent-model limits [claude|codex] [--profile <name> | --profiles all] [--json] [--watch <dur>]
+                                      subscription quota for the accounts this process holds
+                                      credentials for; non-consuming, needs no running server;
+                                      --watch redraws every interval (300 or 5m)
 agent-model status [--config <path>] [--json]
                                       offline health snapshot: gateway liveness, token-store
                                       freshness, and model routing; exit 1 if the gateway is
                                       down or any credential referenced by a nonzero-weight
                                       deployment is unusable
-agent-model schema
-                                      print the filter JSONL wire contract and exit
+agent-model configure-models [--config <path>] [--timeout <dur>]
+                                      query configured upstream model-list endpoints, group results
+                                      by credential source, and add selected models to model_list
+agent-model configure-fallbacks [--config <path>]
+                                      choose a model and set or clear its ordered fallback chain;
+                                      both configuration commands save atomically and require restart
+agent-model keys <create|list|show|disable|enable|revoke|delete|rotate>
+                                      manage DB-backed virtual keys through the running gateway;
+                                      uses $AGENT_MODEL_BASE_URL and the master $AGENT_MODEL_TOKEN
 ```
 
 This list is guarded by `TestCLICommandsDocumented`
 (`cmd/agent-model/commands_doc_test.go`): it parses the command dispatch in
 `main.go` and fails CI if a dispatched subcommand is missing from this block or
 from the `--help` text. Update both when you add or remove a command.
+
+### Runtime virtual keys (`keys`)
+
+The `keys` command is an operator client for the master-only `/v1/keys*`
+endpoints. It defaults to `http://127.0.0.1:8080`; set
+`AGENT_MODEL_BASE_URL` (or pass `--base-url` after the subcommand) and provide
+the master token through `AGENT_MODEL_TOKEN` (or `--token`). Plaintext tokens
+are returned only by create/rotate and are never persisted by the CLI.
+
+```sh
+agent-model keys create --name example-client --models gpt-5.6-sol,gpt-5.6-luna
+agent-model keys list
+agent-model keys show key_abc
+agent-model keys revoke key_abc
+agent-model keys disable key_abc # reversible pause
+agent-model keys enable key_abc  # only non-revoked keys
+agent-model keys delete key_abc  # alias for permanent revocation; retains history
+agent-model keys rotate key_abc              # Service: old secret invalid now; legacy: old key stays active
+agent-model keys rotate --revoke-old key_abc # legacy: revoke old key after new key exists
+```
+
+Create also accepts `--max-budget`, `--budget-duration`, `--duration`, and a
+JSON `--metadata` value. Every command supports `--json`. For secret-manager
+pipelines, `create` and `rotate` support `--token-only`: stdout contains only
+the one-time token, while errors and diagnostics remain on stderr.
+
+Legacy CLI rotation is for non-revoked keys; Portal keys use the personal page. Service keys use the stable-ID, immediate rotation described below. Legacy rotation copies the
+name, model allowlist and budget settings (not expiry). Its metadata records `rotated_from`. The old
+key intentionally remains active by default so callers can deploy the new
+credential before revoking the old one.
+
+### Subscription quota (`limits`)
+
+```sh
+agent-model limits --profiles all              # one snapshot
+agent-model limits --profiles all --watch 300  # redraw every 5 minutes
+agent-model limits --profiles all --json       # machine-readable, schema_version 2
+```
+
+`--watch` takes either a bare second count (`300`, the spelling `watch -n`
+takes) or a Go duration (`5m`), with a 5-second floor: every tick is a live
+authenticated probe per profile — and may rotate a single-use OAuth refresh
+token on the way — while the windows it reports move on 5-hour and weekly
+timescales, so a faster poll buys no information. `--watch` and `--json` are
+mutually exclusive; loop the shell around `--json` if you want a stream.
+
+**Use `--watch` rather than `watch(1)`.** The full seven-column table is about
+125 columns wide, so `watch -n 300 'agent-model limits --profiles all'` folds
+every row at an 80-column terminal and adjacent rows interleave — intermittently,
+because the RESETS cell changes width as countdowns roll over (`14:30 CST`
+versus `Aug 19 09:33 CST`). `--watch` re-measures the terminal on every frame
+and degrades the layout instead of wrapping it: RESETS and SOURCE move to an
+indented continuation line under each row, and WINDOW is clipped with `..` if
+even that does not fit. It also keeps one process on the OAuth probe instead of
+re-execing the binary each tick.
+
+The adaptation is keyed on stdout being a terminal. Piped or redirected output
+is always the unmodified seven-column table, so anything parsing those columns
+is unaffected — by `--watch` as much as by a plain run.
 
 ## Configure
 
@@ -150,10 +223,21 @@ OpenAI-compatible servers (vLLM, llama.cpp, Ollama) that understand only the
 legacy field still work. The router's original request is preserved for
 fallback to providers where those fields are meaningful.
 
-For `auth_mode: subscription` on `anthropic`/`anthropic-oauth` deployments,
-optional `cache_ttl` selects the TTL of the gateway-injected prompt-cache
-breakpoint: omit it for the default `5m`, or set it to `5m` or `1h`. Other
-providers reject this field.
+On `anthropic`/`anthropic-oauth` deployments, optional `cache_ttl` selects the
+TTL of the gateway-injected prompt-cache breakpoint: omit it for the default
+`5m`, or set it to `5m` or `1h`. Other providers reject this field.
+
+Whether that breakpoint is placed at all is decided by `prompt_cache_key` —
+OpenAI's own field, meaning "requests carrying this key share a prefix", and the
+only vocabulary `/v1/chat/completions` has for prompt caching. Sending one tells
+the gateway the prefix recurs and is worth caching, in either auth mode. An
+Anthropic cache write costs 1.25x normal input, so a request with no key gets no
+breakpoint rather than one that can only be paid for and never read back. With
+no key the historical default still applies: `auth_mode: subscription` caches,
+`api_key` does not. Clients speaking `/v1/messages` place their own
+`cache_control` markers instead and the gateway defers to them; either way the
+four-breakpoint Anthropic limit is enforced, and a request already at the cap
+gets no injected marker.
 
 ### Providers
 
@@ -165,7 +249,7 @@ with their own wire shaping, auth, and capabilities:
 | `openai` | OpenAI | Chat, embeddings, images |
 | `anthropic` | Anthropic | `api_key`; `x-api-key` auth |
 | `anthropic-oauth` | Anthropic | `subscription` via `oauth_token_dir`, or `oauth_token_dirs` for a multi-account pool |
-| `chatgpt` | ChatGPT subscription | `subscription`; chat and images; also serves `/v1/messages` |
+| `chatgpt` | ChatGPT subscription | `subscription`; chat and images; also serves `/v1/messages` and streaming `/v1/responses` (including hosted tools such as `web_search`) |
 | `gemini` | Google Gemini | `x-goog-api-key` auth; chat, embeddings, images ("nano banana"), and video (Veo) — the only provider serving `/v1/videos/generations` |
 | `azure` | Azure OpenAI | Needs `base_url` + `api_version`; optional `deployment_name` defaults to `model`; `api-key` auth |
 | `deepseek` | DeepSeek | Chat only, no embeddings |
@@ -245,7 +329,7 @@ rows would undercount spend), so YAML config validation rejects a lifetime
 `budget_duration` longer than `retention.period`.
 
 Enforcement (live on every spending endpoint — `/v1/chat/completions`,
-`/v1/messages`, `/v1/embeddings`, `/v1/images/generations`,
+`/v1/responses`, `/v1/messages`, `/v1/embeddings`, `/v1/images/generations`,
 `/v1/videos/generations`, and the two Replicate prediction-create routes;
 read endpoints like `/v1/models`, `/v1/limits`, `/v1/usage`, the `GET` job
 polls, and Replicate cancellation are not budget-gated):
@@ -287,8 +371,9 @@ Caveats worth knowing:
 - Error `code`s (`model_access_denied`, `budget_check_unavailable`) appear in
   OpenAI-shaped envelopes (`/v1/chat/completions`, `/v1/embeddings`) and,
   when the gateway or messagesbridge has a typed error, inside `/v1/messages`
-  Anthropic error envelopes; raw Anthropic upstream error bodies are still
-  proxied verbatim.
+  Anthropic error envelopes; non-`429` raw Anthropic upstream error bodies are
+  still proxied verbatim, while upstream `429` bodies are consumed for
+  cooldown/fallback.
 - The cap bounds *sustained* spend, not instantaneous spend: concurrent
   in-flight requests can each pass the pre-call check before any of their
   cost rows land, and a stream's cost enters the ledger only when the stream
@@ -319,7 +404,7 @@ must be unique, a key's `token_env` must not collide with
 `models` entries must be unique and reference configured `model_name`s.
 
 Caps are also reported on `GET /v1/limits` (unit `usd`). Live
-`used`/`remaining` reporting on that endpoint is #500; until it lands, the
+`used`/`remaining` reporting on that endpoint is ; until it lands, the
 budget windows show the configured cap with `used`/`remaining` omitted, and
 the live signal for an exhausted budget is the `400 budget_exceeded`
 rejection itself.
@@ -337,7 +422,7 @@ responses, including non-2xx responses, remain in Replicate's native shape:
 
 `type` and `message` are always present. `code` and `param` are present only
 when meaningful and are **omitted entirely** when absent — never serialized as
-`""` (#705). All three official OpenAI SDKs treat an absent `code`/`param`
+`""`. All three official OpenAI SDKs treat an absent `code`/`param`
 identically to a `null` one, so clients should branch on HTTP status and the
 `type`/`code` *when present*. Common codes:
 
@@ -364,7 +449,9 @@ Errors raised inside the `/v1/messages` handler use Anthropic's envelope instead
 
 For gateway-raised errors and messagesbridge errors, the inner object is the
 same typed error, so `code`/`param` appear when known and are omitted when
-absent; raw Anthropic upstream error bodies are proxied unchanged.
+absent; non-`429` raw Anthropic upstream error bodies are proxied unchanged.
+Upstream `429` bodies are consumed for cooldown/fallback; if the routing walk
+exhausts, the gateway returns its typed rate-limit error instead.
 Authentication and master-token checks run before the handler, so their errors
 use the OpenAI envelope even when the requested route is `/v1/messages`.
 
@@ -376,6 +463,20 @@ line endings normalized to `\n`; a terminal `event: error`/`type:"error"` frame
 is audited as `status="error"`
 with the frame's `error.type`, and bridged-provider frames carry the same typed
 error object (`code` when known).
+
+An upstream failure takes its `type` from the HTTP status the provider actually
+returned, not from the text of its response body. The status decides the family
+— `401` authentication, `403` permission, `404` not-found, `408`/`504` timeout,
+`429` rate limit, other `4xx` invalid-request, `503`/`529` service-unavailable,
+other `5xx` upstream — and only within a family is the body consulted, to pick
+between `context_length_exceeded`, `content_policy_violation` and a plain bad
+request, or between `rate_limit_exceeded` and `insufficient_quota`. That split
+matters because the family decides retryability, and therefore whether the
+router falls back at all: a genuine `5xx` whose body happened to contain a
+request id like `req_c401e9ab`, or a token count like `129403`, must not be read
+as a terminal `401`/`403` and stop the walk. Failures that never reached an
+upstream — transport errors, cancellations — have no status and are still
+classified from their message.
 
 On chat and Messages routes, `router_cooldown` controls how long a deployment is
 parked after a retryable failure (e.g. a `429`) before the router retries it;
@@ -400,18 +501,21 @@ credential is out of quota.
 
 Which providers report a hint: `anthropic`/`anthropic-oauth`, `chatgpt`, and the
 whole OpenAI wire path (`openai`, `azure`, `deepseek`, and every
-OpenAI-compatible provider in the table above). `gemini` and `replicate` do not
-yet, and fall back to the defaults on every `429`.
+OpenAI-compatible provider in the table above). `gemini` does not yet and falls
+back to the router default on every `429`. The Replicate passthrough forwards
+upstream `429` responses directly, without gateway cooldown handling.
 
 `router_cooldown: "0"` disables cooling at the deployment layer, and an upstream
 hint does not override it. It does not reach the pool's per-credential cooldown,
 which is not configurable — a pooled credential is parked for the hint (or 5m)
 regardless, up to the 24h clamp.
 
-A `429` the gateway returns to its own clients carries `Retry-After` in whole
-seconds whenever it knows the answer: the soonest moment any deployment for that
-`model_name` becomes eligible again, whether that came from an upstream hint or
-from the time left on a cooldown it already applied.
+A gateway-generated `429` on chat and Messages carries `Retry-After` in whole
+seconds only when its routing walk produced a concrete retry duration: an
+upstream hint, a pooled deployment's calculated credential cooldown, or time
+remaining on a deployment cooldown from an earlier request. It omits the header
+when exhaustion comes solely from `rpm`/`tpm` caps or from fresh, unhinted
+retryable failures in unpooled deployments.
 
 At startup, the server also runs a best-effort background drift check against
 live model lists for providers that support listing. Set `revalidate_interval`
@@ -423,10 +527,10 @@ also the live-model-list cache TTL, and failed refreshes reuse a last-good list.
 
 | Var | Purpose |
 |---|---|
-| `AGENT_MODEL_URL` | base URL read by the shared Go gateway client and `filter` (default: `http://localhost:8090`) |
+| `AGENT_MODEL_URL` | base URL read by the shared Go gateway client (default: `http://localhost:8090`) |
 | `AGENT_MODEL_MODEL` | default model read by the shared Go gateway client (default: `claude-haiku-4-5-20251001`) |
-| `AGENT_MODEL_TOKEN` | bearer token read by the shared Go gateway client and `filter`; also the default master-token env for `serve`, which reads the env named by `auth.bearer_token_env` |
-| `AGENT_MODEL_CONFIG` | default `serve`/`status` config path when `--config` is omitted, and the `usage` config path when neither `--db` nor `--config` is supplied (default: `~/.config/agentmodel/config.yaml`) |
+| `AGENT_MODEL_TOKEN` | bearer token read by the shared Go gateway client; also the default master-token env for `serve`, which reads the env named by `auth.bearer_token_env` |
+| `AGENT_MODEL_CONFIG` | default `serve`/`status` config path when `--config` is omitted, and the `usage` config path when neither `--db` nor `--config` is supplied (default: `${XDG_CONFIG_HOME:-~/.config}/heros/agentmodel/config.yaml`; an existing `~/.config/agentmodel/config.yaml` is used in place) |
 | `AGENT_MODEL_DB` | SQLite default when config `db` is omitted; an explicit config `db` takes precedence |
 | `XDG_DATA_HOME` | base for the canonical SQLite default when config `db` and `AGENT_MODEL_DB` are omitted; a fresh install uses `$XDG_DATA_HOME/heros/agentmodel/agentmodel.db` (or `~/.local/share/heros/agentmodel/agentmodel.db` when unset), while an existing legacy DB stays in place |
 | `keys[].token_env` vars | one bearer token per configured virtual key (unset = key disabled) |
@@ -459,8 +563,8 @@ agent-model anthropic-login --profile work
 agent-model anthropic-login --profile personal
 agent-model profile set work
 agent-model profile list
-agent-shell limits claude --profile work
-agent-shell limits claude --profiles all
+agent-model limits claude --profile work
+agent-model limits claude --profiles all
 ```
 
 With the default profile root, profiles live under:
@@ -540,9 +644,7 @@ Clients then call `POST /v1/images/generations` with `model: "gpt-image-codex"`.
 For this ChatGPT-backed path, `size` and `quality` are forwarded to the tool,
 but `n` is deliberately not sent because the Codex backend rejects
 `tools[0].n`; current ChatGPT subscription image generation returns one image
-per request. This is an experimental, reverse-engineered path — see
-`services/agentmodel/provider/chatgpt/RISK.md` for the same caveats that
-apply to chat.
+per request. This is an experimental, reverse-engineered path.
 
 ### Gemini image and video generation
 
@@ -580,7 +682,7 @@ modality. The call returns a `VideoOperation` immediately, with a gateway-issued
 opaque `id`; poll `GET /v1/videos/{id}` until `status` is terminal. On success
 each `videos[].url` is a gateway content URL (`/v1/videos/{id}/content?index=N`)
 the client fetches with its own bearer — the gateway proxies the bytes from the
-upstream with the provider credential, so the client never needs it (#1493):
+upstream with the provider credential, so the client never needs it:
 
 | `status` | Meaning |
 |---|---|
@@ -599,7 +701,7 @@ gateway restart.
 
 Two things bite in practice. Fetching the gateway content URL still requires
 the caller's gateway bearer token, and each fetch re-polls Gemini and proxies
-the upstream asset rather than persisting the bytes (#841).
+the upstream asset rather than persisting the bytes.
 And video is unmetered: the `gemini/veo-*` registry entries carry no cost
 fields, so submissions record no cost at all (see [Cost tracking](#cost-tracking))
 and spend reports under-count them. Images are priced normally.
@@ -646,6 +748,490 @@ oauth_token_dirs:
   - "/home/alice/.config/agentmodel/anthropic/personal"
 ```
 
+## Employee portal (opt-in)
+
+The same binary embeds a small self-service page at `/portal/`. This is separate
+from `/v1` bearer authentication: an Access assertion never authenticates a
+model request, and a master/API key never authenticates the portal. Place the
+portal origin behind Cloudflare Access; forward `Cf-Access-Jwt-Assertion` and
+preserve the original Host. The application verifies RS256 signatures from the
+configured issuer's fixed `/cdn-cgi/access/certs` URL (no redirects), issuer,
+audience, expiry, immutable subject and exact email domain. Email proxy headers
+are ignored. Signing keys are cached for five minutes; failed refreshes retry no
+more than once per minute, with a five-second network timeout and bounded body.
+
+Example only (not a deployment change):
+
+```yaml
+portal:
+  enabled: false              # explicitly opt in after configuring Access
+  html_dir: ""                # embedded HTML; optional absolute directory
+  origin: https://portal.example.com
+  gateway_origin: https://agent-model.example.com # base URL shown to clients; optional
+  issuer: https://your-team.cloudflareaccess.com
+  audience: e74d87962a061c972188da0ecb062212a408c179ef26fbfec9071591b7fb0854
+  email_domain: example.com # set the exact authorized employee domain
+  admin_emails: [admin@example.com] # exact verified emails, not proxy headers
+```
+
+Enabled configuration requires the origin and identity fields. `admin_emails`
+is optional (empty means no administrators); entries must be valid emails in the
+employee domain. Administrator matching uses exact lowercased, trimmed JWT email.
+Each portal-issued key has its own explicit model allowlist in `api_keys.models`.
+New keys always store `[]`: no inference until an administrator grants models.
+Empty or nil portal allowlists deny every model, never mean unrestricted access.
+The per-key list is read on every bearer request, including model listing and
+fallback routes; edits apply on the next request without rotation or restart.
+Already-running requests retain their authenticated scope. Creation and rotation
+work with an empty list. There is no individual budget or expiry; organization
+budgets still apply. Traditional keys retain their existing empty-means-all semantics.
+`GET /portal/api/me` returns only the caller's safe key policy, revision,
+CSRF token, the configured `gateway_origin` and personal token statistics;
+`?fields=session` omits the statistics. `key.models` (when a key exists) reports
+that person's allowlist. `POST /portal/api/key`
+creates once; `POST /portal/api/key/rotate` requires `{ "revision": N }`.
+Mutation requests require exact Origin, JSON and a double-submit CSRF token
+(`X-CSRF-Token` plus a Secure/HttpOnly/SameSite=Strict host cookie). Responses
+are no-store, the page uses nonce CSP, and plaintext is returned only once and
+never persisted or put in browser storage. A lost response requires refreshing
+and rotating again; plaintext cannot be recovered.
+
+Ownership is `(issuer, sub)` mapped durably to one stable managed-key ID, not
+email. Creation and rotation are transactional; concurrent/stale rotations
+return 409. Rotation changes only the current hash and revision, preserving the
+individual model allowlist and disabled status. Old tokens no longer authenticate.
+Revocation permanently retires the current secret, not the user's Google identity.
+A user can replace a revoked credential via the same revision-checked rotation
+endpoint: a fresh secret keeps the stable key ID and hash history, but starts
+with **no model grants**. Only an administrator can reauthorize it. A separate
+pause, if set, survives replacement. The old secret cannot be enabled or restored.
+Historically hard-deleted Portal rows (from older binaries) remain read-only
+identity tombstones; this change does not guess or recreate their missing policy. The temporary
+portal does not change ledger, retention or other managed-key semantics:
+request logs retain their original hashes, including late old-token completions;
+organization accounting is unaffected. There is no cross-rotation per-key spend
+aggregation. Creation/rotation reject capped keys, expiry or budget durations
+with `unsupported_key_policy` (409), including policy
+added by an operator after creation. Portal keys with such later policy edits
+also fail closed at bearer authentication rather than silently undercounting. Use existing operator-managed keys outside
+the portal when a per-key budget or expiry is needed.
+
+### External portal HTML (optional)
+
+By default (`portal.html_dir: ""`), both pages use the binary's embedded HTML.
+For UI edits without restarting the gateway, set `portal.html_dir` to an absolute
+filesystem directory; on a VM, `/var/lib/agent-model/portal` is recommended. Copy
+the four files from `services/agentmodel/api/` there before enabling the setting:
+`portal.html`, `portal_admin.html`, and the fragments both pages splice in,
+`portal_shared.css` and `portal_shared.js`. Keep the directory root-owned with mode `0755`
+and the HTML files root-owned with mode `0644`, readable but not writable by the
+service account. These are trusted UI code, **not credentials**: never put keys,
+tokens, or other secrets in the HTML or this directory.
+
+Restart the gateway once to enable the setting. Thereafter each authenticated
+page GET reads exactly `portal.html` or `portal_admin.html` from that directory,
+plus `portal_shared.css` / `portal_shared.js` wherever the page carries the
+`{{SHARED_CSS}}` / `{{SHARED_JS}}` placeholders (a fully inlined page needs neither),
+without caching; HTML edits need no rebuild or restart. Write a new file beside
+the target with the same ownership/mode, then atomically rename it over the target
+(on the same filesystem) so a request never sees a partially written page.
+Changing the configured directory itself still requires a restart.
+
+This is not a public static directory: there is no directory listing, arbitrary
+filename route, or URL-selected file. Existing Access JWT and administrator checks
+run before reading HTML; nonce substitution (`{{NONCE}}` in inline script/style
+attributes), CSP and no-store/security headers remain unchanged. Preserve those
+nonce placeholders when editing. An unreadable or missing configured page returns
+HTTP `503` with `portal_html_unavailable`, never stale embedded HTML. Config
+validation checks the path format, not file existence; portal APIs are independent
+of HTML file availability.
+
+### Administrator dashboard and migration
+
+`/portal/admin/` is restricted to verified configured administrators; employees
+receive 403 on every admin path. The employee page only shows the admin link for
+administrators. `GET /portal/admin/api/models` returns the configured gateway model
+catalog; `PUT /portal/admin/api/models` accepts only
+`{"key_id":"key_...","models":["configured-alias"]}` (or an explicit empty array),
+using the same Origin/JSON/CSRF checks. Unknown/duplicate models, missing/null
+arrays and extra fields are rejected. The atomic store update requires a matching
+portal identity or explicit service marker and an existing key; legacy keys, revoked credentials and historical missing rows cannot be
+modified. Only that key's models change, never its name, budget, status or secret.
+Concurrent saves to the same key use last committed write wins.
+
+There is no pre-issuance directory: an employee creates a deny-all key on the
+personal page first, then appears in the dashboard for individual authorization.
+The empty selection is shown as inference denied, distinct from revoked/disabled
+credentials. No shared policy, template or role system is involved. The former
+`/portal/admin/api/policy` endpoint is removed. A `portal_policy` table left by
+an earlier build is neither created nor read; it can be dropped.
+
+`GET /portal/admin/api/overview` lists portal identity/key state, including revoked
+credentials (`revoked_at` is an RFC3339 timestamp when known), historical missing
+rows displayed as revoked without an invented timestamp, service keys labeled `service`, traditional managed keys labeled `legacy_current_hash`,
+and a read-only `master` row labeled **Master key** when the current master is configured.
+The reserved public `key_id: system:master` is a reporting identity, not an
+`api_keys`/`service_keys` row or Google identity; its `models` is `null`.
+Per-key and displayed totals cover retained logs from the rolling 30 × 24 hours,
+not organization-wide usage. Portal rows include all tracked rotation hashes;
+Service, legacy and Master rows include only their current credential. Attribution
+precedence is current master, historical employee ownership, then current managed
+keys; reused hashes are counted once, identically in Monitoring and Users.
+Other config-only keys are not listed. No prompt, completion, plaintext token, hash or
+key metadata is exposed. Each live employee/service row includes its models and controls;
+legacy rows are visibly unmanaged; Master and revoked rows cannot be edited.
+The backend explicitly rejects model/state writes for the reserved Master identity,
+even if a persisted key has that ID. Existing persisted rows using this reserved ID
+are excluded from admin attribution, not treated as master traffic. This dashboard
+cannot reveal existing secrets, add roles, change names, or change budgets/expiry.
+`PUT /portal/admin/api/state` accepts only
+`{"key_id":"key_...","disabled":true}` (or `false`) with the same admin,
+Origin/JSON/CSRF checks. The atomic update rejects legacy/missing/revoked keys;
+it changes only the existing disabled flag. Enable/Disable takes effect on the
+next authentication and preserves model permissions, secret and rotation history.
+It does not cancel in-flight requests. User yearly heatmaps are unchanged.
+
+`POST /portal/admin/api/revoke` accepts only `{"key_id":"key_..."}` with the same
+admin/Origin/JSON/CSRF checks. It permanently retires the credential and is
+idempotent: repeat calls preserve the original revocation timestamp. There is no
+restore or separate deleted state. The row, token hash, ownership, model policy,
+and request/cost associations remain stored; grants cannot be edited while revoked.
+Authentication reads revocation from the DB on every request, before cache use.
+Service replacement rotates the same logical key/name and starts with no grants;
+retired names remain reserved for that identity. Portal replacement
+uses the personal-page flow described above; it does not create a second identity.
+
+The Users tab groups Portal, Service, Master and Legacy rows. Active groups start
+expanded; Disabled / expired and Revoked groups start collapsed with counts.
+Revoked rows retain request-history links and show the revocation time, but no
+Enable or grant editor. Searching opens matching groups. Disable remains a
+reversible pause; Revoke has a permanent-action confirmation.
+
+All managed-key delete entrypoints now retain records. `DELETE /v1/keys/{id}`
+returns 204 for an existing key (including repeated calls), and the key remains
+visible in list/info. `POST /v1/keys/{id}/revoke` is permanent.
+`POST /v1/keys/{id}/enable` lifts reversible pauses on non-revoked keys;
+attempting to enable a revoked key returns 409. Config and Master credentials
+remain managed outside Portal.
+
+SQLite startup adds nullable `api_keys.revoked_at`; existing disabled rows remain
+**disabled**, not retrospectively permanent. Back up the database before upgrade.
+An old binary does not enforce this new column: do not roll back to it while new
+revocations exist without first stopping access and handling those credentials.
+
+#### Create a service API key
+
+In **Users**, enter a service name and choose **Create Service API key**. The
+admin-only `POST /portal/admin/api/service-keys` accepts only
+`{"name":"build-worker"}` under the existing verified Access administrator and
+Origin/JSON/CSRF gate. Model grants and all other properties are rejected at
+creation. A successful **201** returns `key_id`, `name`, `kind: "service"`,
+`state: "active"`, `models: []`, zero `stats`, and the one-time plaintext `key`.
+Only its SHA-256 hash is persisted; no hash is returned. Save the secret in a
+password manager or client secret store before dismissing it. The browser uses
+text-only rendering and clears the reveal on dismiss, tab navigation and
+pagehide; it never puts the key in URLs, history or browser storage. Copying is
+explicit and puts it on the system clipboard (dismiss does not erase clipboard).
+The new row is appended without discarding other unsaved model selections.
+
+Service names are trimmed, nonempty, at most 128 UTF-8 bytes, and contain no
+control characters. Uniqueness uses trimmed Unicode lowercase (not Unicode
+canonical normalization). Collisions with existing managed or configured key
+names, including disabled keys, return **409 `service_name_conflict`** without
+changing the existing key. Service-service duplicates are database-enforced.
+There is no automatic retry: after an interrupted response, refresh before
+trying again because creation may have committed. A lost secret cannot be
+revealed; disable that key and create a differently named replacement.
+
+Services have **no Google/Access employee identity**, employee self-service
+binding or legacy adoption. They start with **deny-all models**; grant models
+using the existing model editor, and use the existing Enable/Disable controls.
+The next request sees policy/state changes. Traditional keys retain their
+empty-means-all behavior. Service credentials share the employee **inference-only
+route policy**: synchronous inference and model listing only, never master
+operations, shared accounts/organization usage, or unscoped asynchronous jobs.
+
+The additive, idempotent schema maintains `service_keys(key_id, normalized_name,
+revision)`, plus `service_key_hashes` for cross-rotation reporting. Issuance
+atomically inserts literal `[]`, the marker, initial hash history and a management
+event. Existing keys are not reclassified; their current Service hashes are
+backfilled, but previously lost hashes cannot be reconstructed.
+
+**Service rotation** is available in Admin and `agent-model keys rotate <id>`.
+It preserves the logical ID, name, classification, creation time, metadata and
+history. Active rotation retains models; replacing a revoked credential clears
+all grants. An independent disabled pause survives both. The old secret stops
+authenticating immediately; the new secret is shown once and never added to
+history or browser storage. There is no overlap/grace period for Service rotation,
+and `--revoke-old` does not change this. If the response is lost, refresh and rotate
+again; the old secret cannot be recovered. Portal keys still rotate through the
+personal identity-bound page; legacy CLI rotation remains unchanged.
+
+`POST /portal/admin/api/service-keys/rotate` takes `{key_id, revision}`;
+`POST /v1/keys/{id}/rotate` takes `{revision}` and requires Master. Get the revision
+from overview or key info. Service model edits also require this observed
+`revision`. Stale credential revisions return 409: refresh, review, retry. The
+SQLite writer transaction serializes rotation, revocation and model changes.
+Unsupported out-of-band Service budget/expiry policies are rejected, not erased.
+Reports, request drilldowns and key-info spend include tracked Service hashes,
+including late logs from in-flight requests; only the current hash authenticates.
+Employee attribution takes precedence on historical collisions as before.
+
+**Management history** is read-only under each key in Admin. It records successful
+create, disable, enable, revoke, rotate and model-edit operations, including
+repeated successful commands, in `key_events`. Each event contains an ordered ID,
+stable target key ID, actor reference, action and UTC timestamp; the UI displays
+Taipei time. No token, credential hash, request body, model list, name, email or
+assertion is copied into this history. Model edits are recorded as events, not a
+before/after policy diff. Actor references for Portal operations are deterministic
+opaque UUIDs derived from verified issuer/subject (not request-body fields).
+They identify a principal without exposing login PII; Master/CLI operations say
+`master / shared-master`, not an invented human caller. Direct Store maintenance
+calls say `system / store`. History starts at upgrade; old events are not invented.
+
+`GET /portal/admin/api/history?key_id=<id>&before=<event-id>` requires the existing
+admin gate. It returns at most 100 newest events; omit `before` for the first page,
+then use the last ID to fetch older events. Events survive rotation/replacement
+and request-log retention. The mutation and audit insertion commit together:
+a history-write failure rolls back the key change. This is an application audit
+trail, not tamper-proof storage against a database administrator.
+
+No new usage limits are implemented or exposed here. Model access, reversible disable and permanent
+revocation are the service controls in this release. Existing USD-budget and
+expiry options belong to the ordinary key CLI/API, not this service creation
+flow. RPM/TPM settings are deployment-level, not per-key; per-key token caps and
+concurrency limits are not supported.
+
+`GET /portal/admin/api/monitoring` is a separate admin-only, metadata-only report.
+The dashboard's monitoring section applies one filter set to complete SQL totals,
+continuous time buckets, requested-model and user/key breakdowns, and paginated
+request details. The key-management section deliberately remains its separately
+labeled rolling-30-day overview; its text search hides rows only, not monitoring
+results. Personal reporting remains identity-derived.
+
+Parameters (single values; unknown/repeated/empty parameters rejected):
+
+- `view`: `full` (default, backward-compatible combined report), `summary`
+  (dashboard and options, no request metadata), `requests` (only matching count
+  and metadata page), or `options` (only selectors). All modes validate the same
+  filters. Overview uses `summary`; Requests uses `requests`, obtaining options
+  separately on initial load/filter changes and reusing them during pagination.
+- `since`, `until`: whole-second RFC3339 timestamps, inclusive/exclusive, converted
+  to UTC. Default is rolling 30 days ending now; an explicit `until` without
+  `since` selects its preceding 30 days. No future endpoints; maximum 366 days.
+- `timezone`: `UTC` (default, preserving existing non-UI consumers) or
+  `Asia/Taipei` (fixed UTC+8). Only these two reporting zones are supported.
+  An explicit value is echoed in `filter.timezone`; omission retains the original
+  response shape. This changes calendar grouping, not timestamp storage or bounds.
+- `bucket`: `day` (default) or `hour` (maximum 31 days). Aligned to the reporting
+  timezone and zero-filled; first/last buckets may be partial. Bucket `start`
+  remains a UTC RFC3339 instant: Taipei January 1 midnight is December 31
+  `16:00:00Z`. Zero means no matching retained records, not proof no usage occurred.
+- `user`, `key_id`, `model` (requested alias), `provider`: exact-match selectors,
+  at most 256 bytes each. Model/provider options come from all retained managed-key
+  logs within the selected time range, independent of the page/other selections.
+- `auth_mode`: `subscription` or `api_key`; `status`: `ok` or `error`.
+- `page`: 1–1,000,000; `page_size`: 1–100 (default 25). Deterministic newest-first
+  metadata order; totals are independent of pagination. The browser freezes the
+  returned range between pages; a fresh HTTP request uses a fresh SQL snapshot.
+
+Both Portal pages explicitly request `timezone=Asia/Taipei` for reporting. All
+user-facing request times, ranges, key expiry, chart/day details and accessible
+labels use Asia/Taipei (UTC+8), independent of the browser timezone. Admin
+`datetime-local` inputs represent Taipei wall time and are converted to UTC
+RFC3339 instants; browser URLs retain the server-resolved, frozen `since`/`until`
+across Apply, drilldowns, pagination, refresh and Back. The reporting zone is
+fixed by the page, not a user-selectable URL preference. The Users overview
+remains a rolling duration, not 30 Taipei calendar dates. Database timestamps,
+budget windows and key policy are unchanged; no timezone migration is needed.
+
+Every response includes the resolved `filter` and
+`scope: retained_managed_keys_and_current_master` when a nonempty master credential
+is configured, otherwise the legacy `scope: retained_managed_keys`.
+The credential-derived reporting scope is supplied internally by the server, not
+accepted in HTTP parameters or returned in JSON.
+`full` additionally returns `stats`, `p95_latency_ms`, `buckets`, `models`, `users`,
+`requests` and selector `options`; `summary` returns the same except `requests`.
+`requests` adds only `request_count` and `requests`; `options` adds only `options`.
+Omitted metrics are not computed zero/null results. Selector `options` contains
+`models` and `providers` across the time range, plus `users` (`id`, `name`) matching
+all dimension filters, preserving the dashboard's user/key suggestions.
+
+Each response uses one read transaction, keeping its count/rows (or dashboard
+aggregates) consistent under concurrent ingestion and rotation. Page reads do not
+materialize the dashboard scope or recompute options, aggregates, P95, buckets or
+breakdowns. Separate summary/options/page responses do **not** share a snapshot:
+frozen bounds prevent a moving window, but late logs, retention and ownership
+changes can still change counts, choices and page membership between responses.
+Browser selector choices are reused only for the current resolved range and
+filters; reload or reapply filters to refresh them. Portal history includes late
+records written under old rotation hashes and deleted key tombstones; legacy
+keys retain current-hash attribution only. **Master key** includes all retained
+records matching the **current configured master credential**, regardless of when
+those records were written, plus ongoing traffic logged under that credential.
+No log migration or timestamp changes are needed. The user/key breakdown and
+selectors label it Master key; drilldowns use the exact reserved public identity
+`system:master`, not a potentially reused service name. Requests are sorted newest
+first (including time-of-day) to inspect latest use. The Users row is read-only and
+links to those requests; it does not grant master management permissions.
+
+This is shared-credential attribution, **not identification of the actual caller**.
+After a future master rotation, only the newly configured credential is matched:
+prior rotated secrets unavailable to the server cannot be identified as master.
+Such records remain stored and are either attributed through existing managed-key
+ownership or excluded, never classified as master merely because they are unowned.
+An empty/disabled master configuration adds no identity and does not match an
+empty credential's digest. Other config virtual keys and arbitrary unknown hashes
+remain excluded. Reporting exposes no master secret or digest in JSON, URLs, UI
+or diagnostic logs, and does not persist it as a managed/service key. Existing
+request-log credential digests remain unchanged. Session/admin authentication,
+bearer precedence and permissions, personal reporting, service/employee controls
+and reporting-reader isolation are unchanged. This is **not an organization-wide
+report** or a budget-enforcement input.
+
+**SQLite reporting isolation (operations):** a disk-backed `OpenSQLite` store owns
+one core read/write connection and one dedicated `mode=ro` reporting connection
+(each max-open/max-idle = 1). Only monitoring (all views), the admin key overview,
+and personal totals/yearly heatmap use the reader. Identity binding, authentication,
+policy/key mutation, budget checks and `LogRequest` remain on core. Non-Portal
+`UsageReport`/`UsageHealthReport`, log lookup/listing, key management reads and
+health checks also remain on core; the standalone read-only CLI constructor keeps
+its existing single handle. No policy cache or budget-accounting semantics change.
+
+Each Portal report has a **15-second context deadline**, including time waiting
+for the sole reader and SQL execution; an earlier caller deadline/cancellation
+wins. This is per store call, not an HTTP/SSE timeout or an admission queue size
+limit. It bounds cooperative database work, not a hard OS scheduling/cleanup
+wall-clock guarantee. Errors use the existing Portal store-error response (503).
+The server intentionally has no whole-request timeout for streams. Fifteen seconds
+leaves headroom over local ~3.2-second 1M-row summaries without allowing an
+unbounded WAL snapshot; it is not a production latency/capacity guarantee.
+
+Only core runs migrations and enables WAL; opening a disk store fails if WAL or
+its reporting reader is unavailable. The reader cannot mutate persistent main
+DB tables but can create writable TEMP tables; report rollback removes those
+scopes, including on cancellation (`query_only` is deliberately not used).
+Filesystem paths and local `file:` URIs with query parameters are accepted;
+URI paths are decoded before securing the actual DB/WAL/SHM as 0600. Writable
+opens accept `mode=rw`/`rwc`, not `ro`, `immutable`, `nolock` or custom `vfs`.
+`:memory:`, empty paths (private ephemeral memory), and `mode=memory`/memory URI
+DSNs explicitly reuse core for reporting: they do **not** gain read-only or WAL
+isolation and never open an unrelated second memory database. Use a disk DB for
+production isolation. Closing the store closes both owned handles.
+
+Reports still compete for CPU, memory and disk I/O. Long snapshots can defer WAL
+checkpoints and grow the WAL; monitor report errors/duration, disk space and WAL
+growth under sustained load. This change does **not** address the independent
+synchronous content-log gzip/mutex stall, nor establish a 100-session production
+SLO on a resource-constrained VM.
+
+Metrics include requests, errors, prompt/completion/total tokens, cache read/write,
+reported reasoning sum and known-record count, mean latency and nearest-rank p95.
+Cache tokens are already within prompt tokens; reasoning is never added to total.
+Cache zero cannot distinguish unreported from zero; nullable reasoning distinguishes
+unknown from reported zero. Request rows exclude hashes, correlation IDs, key
+metadata and error bodies/types, and contain no raw prompt/completion/headers.
+
+Cost uses recorded classification, not recalculation from today's registry:
+response cache first, then subscription per-request accounting $0, API `priced`
+computed USD, explicit `unpriced`, and legacy/unknown separately. Subscription
+accounting $0 is **not actual free service**; the flat fee is out-of-band. Missing
+prices are not zero-priced usage. Response-cache token counts represent replayed
+usage, not new upstream consumption. API computed USD includes both successful
+and failed logged requests in the selected set; it is not an invoice. Equivalent
+API cost is unavailable. No TTFT/concurrency instruments or budgets are added.
+
+**Required existing-deployment cutover (operator action, not automatic):** reset
+**every portal-issued key** to `[]`, rather than silently restoring historical
+snapshots superseded by shared-policy edits. Stop the service and keep traffic
+closed through verification. Back up the current binary, YAML and SQLite using
+SQLite's `.backup` (captures committed WAL content), with owner-only permissions.
+For example, as the service operator, replace the database path with the actual
+configured path:
+
+```sh
+sudo systemctl stop agent-model
+umask 077
+DB=/absolute/path/to/agentmodel.db
+BACKUP="${DB}.before-per-person.$(date -u +%Y%m%dT%H%M%SZ)"
+sqlite3 "$DB" ".backup '$BACKUP'"
+chmod 600 "$BACKUP"
+```
+
+After the backup succeeds, run this one-time SQL against that same database
+before starting the new build:
+
+```sql
+BEGIN IMMEDIATE;
+UPDATE api_keys SET models = '[]'
+WHERE EXISTS (SELECT 1 FROM portal_identities p WHERE p.key_id = api_keys.id);
+SELECT changes() AS reset_portal_keys;
+COMMIT;
+SELECT k.id, k.models FROM api_keys k
+JOIN portal_identities p ON p.key_id = k.id;
+```
+
+Only identity-bound keys are reset. Legacy CLI/config keys, names, hashes,
+revocation, identity revisions, history and usage remain untouched. Do not rerun
+this reset after administrators have started granting individual access.
+Remove obsolete `portal.models` if present; retain/configure `portal.admin_emails`.
+Install the new build and restart. Verify existing portal keys list no models and
+receive 403 for inference, old CLI keys retain their behavior, then authorize
+people individually in `/portal/admin/`. Fresh installations need no policy seed:
+employees can create empty keys immediately. No schema change is required.
+
+**Rollback warning:** old builds can treat empty per-key scopes as unrestricted
+or consult the historical shared policy. Keep traffic closed when rolling back;
+restore a reviewed matching binary/config/database backup and verify authorization
+before reopening. This also discards post-backup changes; do not assume the new
+per-person restrictions survive rollback.
+
+The same `/portal/api/me` response includes `stats` with `request_count`,
+`prompt_tokens` (input), `completion_tokens` (output) and `total_tokens` for the
+past rolling 30 × 24 hours, inclusive of the cutoff and current second.
+`/portal/api/me` accepts optional `timezone=UTC` (default) or
+`timezone=Asia/Taipei` (fixed UTC+8); empty, repeated, unsupported or malformed
+values return 400 (`invalid_reporting_timezone`). Other identity/key selectors
+remain ignored. This also validates the timezone on `fields=session` requests,
+which still skip usage reporting.
+`calendar` contains the current `year` in the reporting timezone, its `timezone`
+name, and a `days` series from January 1 through December 31 (including leap day
+when applicable). The personal page explicitly requests Asia/Taipei: the year
+changes at December 31 `16:00:00Z`, and daily aggregation changes at `16:00:00Z`,
+not at UTC midnight. The default API calendar remains UTC for other consumers.
+Each day has `date` (`YYYY-MM-DD`), `total_tokens` and `requests`. Past/current
+dates in the reporting timezone are zero-filled; future dates have null counts
+and appear blank/disabled, not as zero usage. Today's bucket includes only records through the current
+second. The calendar and rolling summary intentionally cover different windows;
+in early January the summary can include the previous December.
+
+Both views aggregate raw retained request-log counts, including logged errors,
+without adding cache columns or recomputing `total_tokens` from input/output.
+Ownership is selected solely by the verified issuer/subject binding, never email
+or browser-supplied key selectors. A portal-only hash history is written in the
+create/rotate transaction and backfilled idempotently with existing bound current
+hashes on schema migration. Historical hashes are **reporting only** and never
+authenticate. Two or more rotations and late writes under old tracked hashes
+remain attributable; no logs are rewritten and there is no cost/quota feature.
+Unissued users have zero totals. Retention can truncate either window: zero/no
+records is not proof of no usage, and hashes lost before tracking cannot be
+reconstructed. The dependency-free calendar uses fixed daily-token color bins
+(0, 1–999, 1,000–9,999, 10,000–99,999, 100,000+), Taipei dates, accessible day labels
+and a refresh button for both views.
+
+Email-named existing config or managed keys block creation with
+`migration_required`; disabled keys also block. There is no implicit adoption.
+There is no binding endpoint, migration tool or role framework. Existing
+employees keep using their existing key and contact the operator for changes;
+the portal never rewrites YAML or adopts their token.
+
+Portal-issued keys cannot access shared `/v1/usage`, `/v1/limits`, provider
+account usage, key/OAuth management or unscoped asynchronous resources. Their
+allowed surfaces are model listing, chat, responses, messages, embeddings and
+image generation. They neither read nor seed the shared response cache, avoiding
+cross-policy fallback reuse. Model allowlists and budget checks remain enforced
+on inference. Existing non-portal bearer keys retain their behavior.
+
 ## API
 
 All `/v1/*` endpoints require a valid token via `Authorization: Bearer <token>`
@@ -664,6 +1250,7 @@ table in the same change that adds or removes a route.
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI-shaped chat completions, streaming and non-streaming |
+| `POST` | `/v1/responses` | OpenAI Responses API for routed ChatGPT subscription models, including hosted tools; supports streaming and buffered responses, defaults omitted `store` to `false`, omits the subscription backend's unsupported `max_output_tokens`, rewrites `model`, and fills an empty terminal `response.output` from preceding `response.output_item.done` events; does not retry after an upstream response has opened |
 | `POST` | `/v1/messages` | Anthropic-shaped Messages API: native passthrough or bridged-provider translation |
 | `POST` | `/v1/embeddings` | OpenAI-shaped embeddings |
 | `POST` | `/v1/images/generations` | OpenAI-shaped image generation |
@@ -678,14 +1265,17 @@ table in the same change that adds or removes a route.
 | `GET` | `/v1/limits` | Rate-limit + budget snapshot (see below) |
 | `GET` | `/v1/usage` | Usage/spend rollups, grouped by `model`/`provider`/`api_key`/`auth_mode`/`day` |
 | `GET` | `/v1/account/anthropic/usage` | Upstream Anthropic subscription usage for one `?profile=` (see below) |
+| `GET` | `/v1/account/openai/usage` | Upstream OpenAI/Codex subscription usage (see below) |
 | `POST` | `/v1/oauth/chatgpt/start` | Start ChatGPT device-code OAuth **(master only)** |
 | `POST` | `/v1/oauth/chatgpt/poll` | Poll ChatGPT device-code OAuth **(master only)** |
 | `POST` | `/v1/keys` | Mint a virtual API key; returns the token once **(master only)** |
 | `GET` | `/v1/keys` | List virtual API keys (never returns plaintext) **(master only)** |
 | `GET` | `/v1/keys/{id}` | A key's config plus successful spend retained in `request_logs` (lifetime only when no rows were purged) **(master only)** |
-| `POST` | `/v1/keys/{id}/revoke` | Disable a key without deleting it **(master only)** |
-| `POST` | `/v1/keys/{id}/unrevoke` | Re-enable a revoked key **(master only)** |
-| `DELETE` | `/v1/keys/{id}` | Delete a key **(master only)** |
+| `POST` | `/v1/keys/{id}/rotate` | Replace Service secret with stable ID; requires revision **(master only)** |
+| `POST` | `/v1/keys/{id}/revoke` | Permanently revoke a key, retaining history **(master only)** |
+| `POST` | `/v1/keys/{id}/disable` | Reversibly pause a non-revoked key **(master only)** |
+| `POST` | `/v1/keys/{id}/enable` | Enable a paused, non-revoked key **(master only)** |
+| `DELETE` | `/v1/keys/{id}` | Permanently revoke a key (idempotent; history retained) **(master only)** |
 | `GET` | `/healthz`, `/livez`, `/readyz` | Liveness/readiness checks (unauthenticated) |
 | `GET` | `/metrics` | Prometheus metrics when `telemetry.metrics.enabled` is true (unauthenticated) |
 
@@ -714,7 +1304,7 @@ one window per cap with unit `usd`:
 pre-call enforcement skips deployments on), flipping to
 `window_status: "limited"` with a reset at the next minute boundary once the
 cap is reached. Budget (`usd`) windows still omit `used`/`remaining` until
-ledger metering is wired here (#500); budget caps are *enforced* on the
+ledger metering is wired here; budget caps are *enforced* on the
 spending endpoints regardless (`400 budget_exceeded` pre-call).
 
 ```jsonc
@@ -725,7 +1315,7 @@ spending endpoints regardless (`400 budget_exceeded` pre-call).
     {
       "limit_name": "org/default:budget",
       "window": "720h", "unit": "usd",
-      "limit": 100.0,  // remaining/used omitted until live metering (#500)
+      "limit": 100.0,  // remaining/used omitted until live metering
       "reset_description": "fixed UTC window; resets every 720h",
       "source": "agentmodel", "window_status": "ok",
       "as_of": "2026-06-16T10:44:51Z"   // every window carries as_of
@@ -763,13 +1353,40 @@ renders a normal `unknown` row instead of treating the probe as a transport
 failure. An expired access token is refreshed first when a refresh token is
 available. Re-authenticate with `agent-model anthropic-login`.
 
+### `GET /v1/account/openai/usage`
+
+The sibling of the Anthropic endpoint, for the **OpenAI/Codex subscription**,
+served here for the same reason: this process owns the ChatGPT OAuth credential
+(`agent-model chatgpt-login`), so it is the only one that uses or rotates it.
+
+It reads `GET {ChatGPTAPIBase}/usage` — the backend the Codex CLI itself talks
+to — and normalizes it to the same `BackendLimits` shape. Windows are named
+`<limit-id>_<duration>`: `codex_weekly` for the account-wide limit, and
+`<metered_feature>_<duration>` for each per-model-family limit, e.g.
+`codex_bengalfox_weekly`. Each carries `used_percent`, optional `reset_at`, and
+`source: "codex_oauth"`. `auth.plan` reports the subscription tier.
+
+**A window is named from its own `limit_window_seconds`, never from the slot it
+arrives in.** OpenAI removed the 5-hour window on 2026-07-12 and the weekly
+window took over the `primary_window` slot, so slot position is not a stable
+signal of duration. A window carrying no usable duration is dropped rather than
+given a name that could collide with a real one, since two rows sharing a
+`limit_name` would print identical labels over contradicting numbers.
+
+A missing credential or an upstream failure returns HTTP 200 with a structured
+`error` (`codex_oauth_login_required` / `codex_oauth_usage_unavailable` /
+`codex_oauth_no_limits`), matching the Anthropic endpoint's contract.
+
+The read is non-consuming: it never POSTs `/responses`, so reporting quota
+cannot spend it.
+
 ## Cost tracking
 
 Token-priced requests compute USD cost from provider-returned usage and the
 embedded price registry (`services/agentmodel/cost/model_prices.json`,
 keyed first as `<provider>/<resolved-model>` and then by bare resolved model
-id, e.g. `openai/gpt-4o`). Replicate prediction creates instead compute the
-supported per-output costs from the request body and registry; video-generation
+id, e.g. `openai/gpt-4o`). Replicate prediction creates instead compute
+supported unit-based costs from the request body and registry; video-generation
 submissions currently record no cost. Provider-backed audit rows that compute cost record
 a `cost_source` so a `$0` is not ambiguous; failed requests with no computed
 cost can leave it empty:
@@ -796,6 +1413,42 @@ the flat gateway fields (`cache_read_input_tokens`,
 `prompt_tokens_details.cached_tokens` /
 `prompt_tokens_details.cache_write_tokens`.
 
+### Reasoning-token collection
+
+Audit rows retain upstream-reported reasoning counts in nullable
+`request_logs.reasoning_tokens` for later analysis. Missing or JSON `null`
+means **unknown**, not zero; an explicit `0` is retained. Opening the SQLite
+store automatically adds `reasoning_tokens INTEGER NULL` to older databases;
+the migration is idempotent and historical rows remain NULL. No historical
+backfill, token estimation, reasoning-text inspection, or new raw-payload
+storage is performed.
+
+Collection covers non-streaming and streaming usage (often only the final
+usage event), including the `/v1/messages` bridge and native `/v1/responses`
+audit path:
+
+| Upstream | Reported field |
+|---|---|
+| OpenAI chat completions, Azure, DeepSeek, other OpenAI-compatible adapters | `completion_tokens_details.reasoning_tokens`, **only if supplied** |
+| ChatGPT subscription Responses (including chat-completion translation) | `output_tokens_details.reasoning_tokens` |
+| Anthropic | `output_tokens_details.thinking_tokens`, **only if supplied** |
+| Gemini | `usageMetadata.thoughtsTokenCount` |
+
+OpenAI-shaped gateway responses expose known counts as
+`usage.completion_tokens_details.reasoning_tokens`; the Go client and response
+cache preserve this field on JSON round trips. A missing count is omitted.
+Replicate and adapters/responses without a numeric detail remain unknown;
+support for reasoning text does not imply support for a reasoning-token count.
+These mappings do not guarantee any particular model or subscription reports it.
+
+Reasoning is **detail, never an extra addend** to `total_tokens`. OpenAI /
+Responses completion/output counts already include reasoning; adding it again
+would double-count. Existing provider conventions stay unchanged: in particular,
+Gemini completion counts remain `candidatesTokenCount`, with its separately
+reported `totalTokenCount` retained rather than reconstructed. Prompt totals
+continue to include cache-read/write tokens, with those details stored separately.
+This collector does not change cost, budgets, aggregate reports, or portal UI.
+
 ## Response cache
 
 An opt-in cache for **non-streaming** `/v1/chat/completions`. It is **off by
@@ -811,10 +1464,11 @@ cache:
 
 The cache is content-addressed: the key is a SHA-256 over the cache-key-affecting
 request fields (`model`, `messages`, `temperature`, `max_tokens`, `top_p`,
-`stop`, `tools`, `tool_choice`, `prompt_cache_key`, `thinking`,
-`reasoning_effort`). `stream` and `user` are excluded from the key; streaming
-requests bypass the cache, and `user` is treated as a tracking tag rather than
-an output determinant (matching LiteLLM's default key). ChatGPT subscription deployments also forward
+`stop`, `tools`, `tool_choice`, `thinking`, `reasoning_effort`). `stream`,
+`user`, and `prompt_cache_key` are excluded from the key; streaming requests
+bypass the cache, `user` is treated as a tracking tag rather than an output
+determinant (matching LiteLLM's default key), and `prompt_cache_key` is upstream
+routing/prefix-recurrence metadata rather than an output determinant. ChatGPT subscription deployments also forward
 `prompt_cache_key` to the upstream Responses body. For ChatGPT-backed chat, the
 gateway sends the Codex `session-id` header used for prompt-cache stickiness:
 an explicit `prompt_cache_key` becomes that header; otherwise agentmodel
@@ -941,9 +1595,11 @@ content assembled up to that point can still be logged. A request rejected
 before it reaches the upstream (auth, validation, a `4xx` the gateway raises)
 writes no content record. Chat calls also write no content record when provider
 dispatch fails, a non-streaming provider call returns an error, or a stream
-yields a provider error. By contrast, Messages and Replicate creates preserve
-raw JSON non-2xx upstream response bodies; a Messages stream is logged only
-when a `message_start` event made an assembled response possible.
+yields a provider error. By contrast, Replicate creates preserve raw JSON
+non-2xx upstream response bodies; Messages preserves non-`429` bodies, while
+its router consumes raw `429` responses for cooldown/fallback rather than
+logging them. A Messages stream is logged only when a `message_start` event
+made an assembled response possible.
 
 **Reading it.** It is plain JSON Lines — use `jq`:
 
@@ -963,8 +1619,17 @@ tail -1 content.jsonl | jq '{model: .request.model,
 - **It holds raw prompts and completions** — system prompts, tool I/O,
   everything. The logger applies no redaction or configured size truncation;
   streamed records can still be partial on client disconnect as noted above.
-  The file is created `0600`; treat it as sensitive and put it on encrypted
-  storage if your threat model needs it.
+  The file is `0600` — enforced on every open, not only at creation, so a log
+  pre-created by `touch` or by an external rotator's `create 0644` is tightened
+  rather than left readable. If the mode cannot be set (the file is owned by
+  another user, say), startup fails instead of writing unredacted content to a
+  file whose readers we cannot bound. The parent directory is created if it is
+  absent and forced to `0700` — including one you created yourself, since a
+  directory left `0755` is what makes the file's mode moot. Give the content log
+  its own directory rather than a shared one: pointing it at `/var/log` would
+  narrow that directory for everything else living there. Treat the whole
+  directory as sensitive and put it on encrypted storage if your threat model
+  needs it.
 - **Best-effort, synchronous writes.** A write or marshal error is logged and
   swallowed, so content logging never fails the request. Writes, inline rotation,
   compression, and pruning are serialized and can add work after the response
@@ -1056,9 +1721,20 @@ table and telemetry exporters are metadata-only and stay that way. The
 [content log](#content-logging) can hold both raw prompts and completions; the
 optional response cache also retains completion bodies, in memory and
 optionally in SQLite. The content log is off unless you set `content_log.path`,
-created as a `0600` JSON Lines file with no redaction, and **not** covered by the
+is a `0600` JSON Lines file with no redaction, and is **not** covered by the
 `retention` purge above; configure its separate rotation/retention policy. See
 [Content logging](#content-logging) for the full description.
+
+Every file the gateway writes that can hold prompt or completion text is `0600`,
+and the mode is applied before the file is first written rather than after, so
+it never exists world-readable even briefly: the content log, the SQLite
+response cache (`cache.sqlite_path`) and its `-wal`, and the audit database
+(`database.path`). A file left `0644` by an older version is tightened the next
+time the gateway opens it, and an open that cannot reach `0600` fails rather
+than proceeding. Two consequences worth knowing: the parent directories are
+yours to create — nothing here widens or narrows an existing one — and after the
+first restart on this version, `agent-model usage --db` run as a different user
+than the gateway will get a permission error where it previously worked.
 
 See `cmd/agent-model/example_config.yaml` and `services/agentmodel/README.md`
 for a fuller configuration walkthrough.

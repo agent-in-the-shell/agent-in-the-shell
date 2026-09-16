@@ -10,7 +10,7 @@ import (
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel"
 )
 
-// Pre-request enforcement (#47/#52) for every spending endpoint
+// Pre-request enforcement for every spending endpoint
 // (/v1/chat/completions, /v1/messages, /v1/embeddings, /v1/images/generations,
 // /v1/videos/generations, and the /v1/predictions* Replicate passthrough — each
 // calls s.enforce()). Read endpoints (/v1/models, /v1/limits, /v1/usage, the

@@ -141,9 +141,10 @@ type geminiCandidate struct {
 }
 
 type geminiUsage struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
-	TotalTokenCount      int `json:"totalTokenCount"`
+	PromptTokenCount     int  `json:"promptTokenCount"`
+	CandidatesTokenCount int  `json:"candidatesTokenCount"`
+	TotalTokenCount      int  `json:"totalTokenCount"`
+	ThoughtsTokenCount   *int `json:"thoughtsTokenCount"`
 	// CachedContentTokenCount is the portion of promptTokenCount served from
 	// Gemini's context cache (implicit or explicit). Unlike Anthropic's
 	// input_tokens, promptTokenCount already includes these, so we surface them
@@ -160,6 +161,7 @@ func (u *geminiUsage) toUsage(authMode string) agentmodel.Usage {
 		PromptTokens:         u.PromptTokenCount,
 		CompletionTokens:     u.CandidatesTokenCount,
 		TotalTokens:          u.TotalTokenCount,
+		ReasoningTokens:      u.ThoughtsTokenCount,
 		CacheReadInputTokens: u.CachedContentTokenCount,
 		AuthMode:             authMode,
 	}
@@ -349,24 +351,11 @@ var _ provider.ModelLister = (*Client)(nil)
 // prefix is stripped to match the bare model id used in deployments.
 // Implements provider.ModelLister.
 func (c *Client) ListModels(ctx context.Context) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1beta/models?pageSize=1000", nil)
+	resp, err := c.doGET(ctx, "/v1beta/models?pageSize=1000", "list-models")
 	if err != nil {
-		return nil, fmt.Errorf("gemini: build list-models request: %w", err)
-	}
-	if c.auth != nil {
-		if err := c.auth.Apply(ctx, req); err != nil {
-			return nil, err
-		}
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("gemini: do list-models request: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("gemini: list-models HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
 	var out struct {
 		Models []struct {
 			Name string `json:"name"`
@@ -382,7 +371,7 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
-func (c *Client) doJSON(ctx context.Context, path string, body any) (*http.Response, error) {
+func (c *Client) doJSON(ctx context.Context, path string, body any, op string) (*http.Response, error) {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -392,6 +381,30 @@ func (c *Client) doJSON(ctx context.Context, path string, body any) (*http.Respo
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return c.send(ctx, req, op)
+}
+
+// send applies the client credential, performs req, and turns any non-2xx into
+// an error carrying the upstream status. On success the response is returned
+// with its body still open — the caller owns it.
+//
+// Every HTTP path in this package goes through here, which is the point. The
+// status used to be attached by each call site remembering to do it on its own
+// `StatusCode >= 400` branch, and DownloadVideo did not — so it hardcoded a
+// retryable upstream_error for every status and survived two PRs that were
+// specifically about this. One chokepoint makes that class
+// unrepresentable rather than merely absent: a new endpoint cannot forget a
+// step it never writes.
+//
+// The status is what matters because wire.Wrap classifies by it rather than by
+// substrings of the body interpolated into the message — Gemini error bodies
+// repeat the numeric code and quote durations, either of which can collide with
+// a status needle and flip a retryable 5xx to a terminal 4xx.
+//
+// op names the call ("list-models", "poll-video") and is required. It is the
+// only thing separating one endpoint's failure from another's in a log line,
+// so there is deliberately no "unlabelled" spelling for a caller to default to.
+func (c *Client) send(ctx context.Context, req *http.Request, op string) (*http.Response, error) {
 	if c.auth != nil {
 		if err := c.auth.Apply(ctx, req); err != nil {
 			return nil, err
@@ -399,14 +412,16 @@ func (c *Client) doJSON(ctx context.Context, path string, body any) (*http.Respo
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("gemini: %s: %w", op, err)
 	}
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("gemini: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	if resp.StatusCode < 400 {
+		return resp, nil
 	}
-	return resp, nil
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return nil, agentmodel.WithUpstreamStatus(
+		fmt.Errorf("gemini: %s: HTTP %d: %s", op, resp.StatusCode, strings.TrimSpace(string(body))),
+		resp.StatusCode)
 }
 
 // ----- Provider methods -----
@@ -422,7 +437,7 @@ func (c *Client) Complete(ctx context.Context, req agentmodel.ChatRequest) (agen
 	body := buildRequest(req)
 	path := fmt.Sprintf("/v1beta/models/%s:generateContent", req.Model)
 
-	httpResp, err := c.doJSON(ctx, path, body)
+	httpResp, err := c.doJSON(ctx, path, body, "generate-content")
 	if err != nil {
 		return agentmodel.ChatResponse{}, err
 	}
@@ -471,7 +486,7 @@ func (c *Client) Stream(ctx context.Context, req agentmodel.ChatRequest) (iter.S
 	body := buildRequest(req)
 	path := fmt.Sprintf("/v1beta/models/%s:streamGenerateContent?alt=sse", req.Model)
 
-	httpResp, err := c.doJSON(ctx, path, body)
+	httpResp, err := c.doJSON(ctx, path, body, "generate-content-stream")
 	if err != nil {
 		return nil, err
 	}
@@ -513,7 +528,7 @@ func (c *Client) Stream(ctx context.Context, req agentmodel.ChatRequest) (iter.S
 			if len(gr.Candidates) == 0 {
 				// A prompt-level safety block arrives as zero candidates + a
 				// blockReason; surface it rather than swallowing it into a
-				// truncated success (#1487).
+				// truncated success.
 				if reason := gr.promptBlockReason(); reason != "" {
 					yield(provider.StreamChunk{}, promptBlockedError(reason))
 					return
@@ -600,7 +615,7 @@ func (c *Client) Embed(ctx context.Context, req agentmodel.EmbeddingRequest) (ag
 		body := geminiEmbedRequest{
 			Content: geminiContent{Parts: []geminiPart{{Text: text}}},
 		}
-		httpResp, err := c.doJSON(ctx, path, body)
+		httpResp, err := c.doJSON(ctx, path, body, "embed-content")
 		if err != nil {
 			return agentmodel.EmbeddingResponse{}, err
 		}

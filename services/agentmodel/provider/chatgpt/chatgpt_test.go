@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,7 +23,7 @@ import (
 
 // writeSSE writes a minimal Responses API SSE stream — response.created, one
 // response.output_text.delta per delta, then response.completed carrying usage.
-// Since #811, Complete drives the streaming path and aggregates, so its tests
+// Since , Complete drives the streaming path and aggregates, so its tests
 // serve SSE rather than a buffered JSON body.
 func writeSSE(w http.ResponseWriter, deltas []string, promptTok, completionTok, totalTok int) {
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -382,6 +383,124 @@ func TestBuildRequest_ResponsesCompatibility(t *testing.T) {
 	}
 	if !strings.Contains(bodyJSON, `"type":"function_call_output","call_id":"call_1"`) {
 		t.Fatalf("function_call_output missing from body: %s", bodyJSON)
+	}
+}
+
+func TestListModels_UsesCodexCatalogEndpoint(t *testing.T) {
+	var gotMethod, gotQuery, gotAuth, gotAccept, gotOriginator, gotUserAgent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotQuery = r.URL.Query().Get("client_version")
+		gotAuth = r.Header.Get("Authorization")
+		gotAccept = r.Header.Get("Accept")
+		gotOriginator = r.Header.Get("Originator")
+		gotUserAgent = r.Header.Get("User-Agent")
+		_, _ = io.WriteString(w, `{"models":[{"slug":"gpt-5.6-sol"},{"slug":""},{"slug":"gpt-5.6-sol"},{"slug":"gpt-5.6-luna"}]}`)
+	}))
+	defer srv.Close()
+
+	models, err := NewWithBaseURL(freshAuth(t), srv.URL).ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodGet {
+		t.Errorf("method = %q, want GET", gotMethod)
+	}
+	if gotQuery != auth.ChatGPTClientVersion {
+		t.Errorf("client_version = %q, want %q", gotQuery, auth.ChatGPTClientVersion)
+	}
+	if gotAuth != "Bearer valid-token" {
+		t.Errorf("Authorization = %q", gotAuth)
+	}
+	if gotAccept != "application/json" {
+		t.Errorf("Accept = %q", gotAccept)
+	}
+	if gotOriginator != auth.ChatGPTOriginator {
+		t.Errorf("Originator = %q", gotOriginator)
+	}
+	if !strings.HasPrefix(gotUserAgent, "codex_cli_rs/"+auth.ChatGPTClientVersion) {
+		t.Errorf("User-Agent = %q", gotUserAgent)
+	}
+	want := []string{"gpt-5.6-sol", "gpt-5.6-luna"}
+	if !reflect.DeepEqual(models, want) {
+		t.Fatalf("models = %v, want %v", models, want)
+	}
+}
+
+func TestListModels_RejectsEmptyOrMalformedCatalog(t *testing.T) {
+	for _, body := range []string{`{}`, `{"models":[]}`, `{"models":[{"slug":""}]}`, `{not-json`} {
+		t.Run(body, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+			if _, err := NewWithBaseURL(freshAuth(t), srv.URL).ListModels(context.Background()); err == nil {
+				t.Fatal("expected model-list error")
+			}
+		})
+	}
+}
+
+func TestListModels_RetriesAfterExpiredTokenRefresh(t *testing.T) {
+	var refreshHits int32
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth/token" {
+			http.NotFound(w, r)
+			return
+		}
+		atomic.AddInt32(&refreshHits, 1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "refreshed-token", "refresh_token": "new-rt", "expires_in": 3600,
+		})
+	}))
+	defer authSrv.Close()
+
+	var calls int32
+	var retryAuth string
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"code":"token_expired"}}`)
+			return
+		}
+		retryAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"models":[{"slug":"gpt-5.6-sol"}]}`)
+	}))
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	writeAuthFile(t, dir, map[string]any{
+		"access_token": "server-rejected-token", "refresh_token": "old-rt",
+		"expires_at_ms": time.Now().Add(time.Hour).UnixMilli(),
+	})
+	a := auth.NewChatGPTOAuth(dir, &http.Client{Timeout: 5 * time.Second})
+	a.OverrideURLs(authSrv.URL+"/devicecode", authSrv.URL+"/devicetoken", authSrv.URL+"/oauth/token")
+
+	models, err := NewWithBaseURL(a, apiSrv.URL).ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(models, []string{"gpt-5.6-sol"}) {
+		t.Fatalf("models = %v", models)
+	}
+	if atomic.LoadInt32(&refreshHits) != 1 || atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("refreshes = %d, calls = %d", refreshHits, calls)
+	}
+	if retryAuth != "Bearer refreshed-token" {
+		t.Fatalf("retry Authorization = %q", retryAuth)
+	}
+}
+
+func TestListModels_ReturnsUpstreamStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":"denied"}`)
+	}))
+	defer srv.Close()
+	_, err := NewWithBaseURL(freshAuth(t), srv.URL).ListModels(context.Background())
+	var upstream *apiError
+	if !errors.As(err, &upstream) || upstream.UpstreamStatus() != http.StatusForbidden {
+		t.Fatalf("error = %v, want apiError with 403", err)
 	}
 }
 
@@ -1374,7 +1493,7 @@ func TestStream_RetriesOnExpiredToken(t *testing.T) {
 	}
 }
 
-// ─── session-id / prompt cache stickiness (issue #1279) ──────────────────────
+// ─── session-id / prompt cache stickiness ──────────────────────
 
 // The ChatGPT/codex backend keys its prompt cache on the session-id request
 // header, not the body prompt_cache_key. stableSessionID must yield the SAME id

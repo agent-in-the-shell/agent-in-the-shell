@@ -4,7 +4,8 @@
 // Plus/Pro subscription.
 //
 // IMPORTANT: this endpoint is reverse-engineered. It is NOT a documented
-// third-party API. See RISK.md for the caveats and mitigation guidance.
+// third-party API. Compatibility can change independently of this gateway;
+// configure an API-key provider as fallback when availability matters.
 //
 // The endpoint speaks OpenAI's "Responses API" shape (newer than chat
 // completions). This package translates between Responses and the Chat
@@ -22,6 +23,7 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -83,6 +85,74 @@ func (c *Client) AuthMode() string { return agentmodel.AuthModeSubscription }
 func (c *Client) SupportedModels() []string {
 	return []string{"gpt-5", "gpt-5-pro", "gpt-5-codex"}
 }
+
+// ListModels returns the live model catalog offered to this ChatGPT
+// subscription account. The Codex backend uses {"models":[{"slug":...}]}
+// rather than the public OpenAI API's {"data":[{"id":...}]} shape.
+func (c *Client) ListModels(ctx context.Context) ([]string, error) {
+	models, err := c.listModelsOnce(ctx)
+	if err != nil && c.recoverExpiredToken(ctx, err) {
+		models, err = c.listModelsOnce(ctx)
+	}
+	return models, err
+}
+
+func (c *Client) listModelsOnce(ctx context.Context) ([]string, error) {
+	u, err := url.Parse(c.baseURL + "/models")
+	if err != nil {
+		return nil, fmt.Errorf("chatgpt: build models URL: %w", err)
+	}
+	query := u.Query()
+	query.Set("client_version", auth.ChatGPTClientVersion)
+	u.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("chatgpt: build models request: %w", err)
+	}
+	if err := c.auth.Apply(ctx, req); err != nil {
+		return nil, fmt.Errorf("chatgpt: apply auth: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("chatgpt: list models: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, &apiError{
+			statusCode: resp.StatusCode,
+			status:     resp.Status,
+			body:       strings.TrimSpace(string(body)),
+		}
+	}
+
+	var payload struct {
+		Models []struct {
+			Slug string `json:"slug"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("chatgpt: decode models response: %w", err)
+	}
+	seen := make(map[string]bool, len(payload.Models))
+	models := make([]string, 0, len(payload.Models))
+	for _, model := range payload.Models {
+		slug := strings.TrimSpace(model.Slug)
+		if slug == "" || seen[slug] {
+			continue
+		}
+		seen[slug] = true
+		models = append(models, slug)
+	}
+	if len(models) == 0 {
+		return nil, errors.New("chatgpt: models response contained no model slugs")
+	}
+	return models, nil
+}
+
+var _ provider.ModelLister = (*Client)(nil)
 
 // ─── Responses API request/response wire types ───────────────────────────
 
@@ -157,6 +227,9 @@ type responsesUsage struct {
 	InputTokensDetails *struct {
 		CachedTokens int `json:"cached_tokens,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails struct {
+		ReasoningTokens *int `json:"reasoning_tokens"`
+	} `json:"output_tokens_details"`
 }
 
 // cachedTokens returns the cached prompt-token count (or 0 if absent).
@@ -221,7 +294,7 @@ func buildRequest(req agentmodel.ChatRequest, stream bool) (responsesRequest, er
 // one are load-balanced across nodes, so the large stable prefix (system +
 // tools + early history) only caches by luck — the real Codex CLI reaches
 // 30–80% cache hits by sending a per-session UUID, while a header-less gateway
-// sees near-zero (issue #1279). The body prompt_cache_key has no effect on this
+// sees near-zero. The body prompt_cache_key has no effect on this
 // backend; the header is what matters.
 //
 // This gateway is stateless (each HTTP turn is independent), so it cannot use a
@@ -547,6 +620,12 @@ func (e *apiError) Error() string {
 // to size their cooldowns.
 func (e *apiError) RetryAfterHint() time.Duration { return e.retryAfter }
 
+// UpstreamStatus implements wire.UpstreamStatusHinter so agentmodel.Wrap
+// classifies by the status we already hold rather than by substrings of the
+// body Error() interpolates. See the same method on the anthropic adapter's
+// statusError for why the body cannot be trusted to name its own family.
+func (e *apiError) UpstreamStatus() int { return e.statusCode }
+
 // retryAfterFromBody reads the reset hint the codex backend puts in a 429 body
 // rather than in a header: {"error":{"type":"usage_limit_reached",
 // "resets_in_seconds":N}}. This is the signal that matters for a pooled
@@ -787,7 +866,7 @@ func (c *Client) doStream(ctx context.Context, body []byte, sessionID string) (*
 	req.Header.Set("Accept", "text/event-stream")
 	// The codex backend pins prompt-cache routing to session-id; a stable value
 	// across a conversation's turns is what makes the prefix actually cache
-	// (issue #1279). Empty for one-shot calls (e.g. image generation).
+	//. Empty for one-shot calls (e.g. image generation).
 	if sessionID != "" {
 		req.Header.Set("session-id", sessionID)
 	}
@@ -962,6 +1041,7 @@ func (c *Client) consumeStream(resp *http.Response, yield func(provider.StreamCh
 				PromptTokens:         ev.Response.Usage.InputTokens,
 				CompletionTokens:     ev.Response.Usage.OutputTokens,
 				TotalTokens:          ev.Response.Usage.TotalTokens,
+				ReasoningTokens:      ev.Response.Usage.OutputTokensDetails.ReasoningTokens,
 				CacheReadInputTokens: ev.Response.Usage.cachedTokens(),
 				CostUSD:              0,
 				AuthMode:             agentmodel.AuthModeSubscription,
@@ -1003,6 +1083,10 @@ func (c *Client) consumeStream(resp *http.Response, yield func(provider.StreamCh
 			}
 			continue
 		}
+		// No default: anything that is neither an event nor a data line is
+		// ignored, which is what the SSE spec asks for with comment lines (":"
+		// prefix, used upstream as keep-alives) and with fields we do not
+		// consume (id:, retry:).
 		switch {
 		case strings.HasPrefix(line, "event:"):
 			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
@@ -1011,8 +1095,6 @@ func (c *Client) consumeStream(resp *http.Response, yield func(provider.StreamCh
 				dataBuf.WriteByte('\n')
 			}
 			dataBuf.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-		case strings.HasPrefix(line, ":"):
-			// SSE comment; ignore.
 		}
 	}
 	// Flush any trailing event without a terminating blank line.
@@ -1036,10 +1118,37 @@ func (c *Client) consumeStream(resp *http.Response, yield func(provider.StreamCh
 	return emitted, aborted, retryable, err
 }
 
+// ResponsesPassthrough forwards a caller-authored Responses API request to the
+// Codex backend while replacing only its logical model. Authentication is
+// always applied from this Client; caller headers never enter this interface.
+func (c *Client) ResponsesPassthrough(ctx context.Context, body []byte, modelOverride string) (*http.Response, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, agentmodel.NewErrorf(agentmodel.ErrTypeInvalidRequest, "chatgpt: invalid Responses JSON: %v", err)
+	}
+	model, err := json.Marshal(modelOverride)
+	if err != nil {
+		return nil, fmt.Errorf("chatgpt: marshal model override: %w", err)
+	}
+	payload["model"] = model
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("chatgpt: marshal Responses request: %w", err)
+	}
+	resp, err := c.doStream(ctx, rewritten, "")
+	if err != nil && c.recoverExpiredToken(ctx, err) {
+		resp, err = c.doStream(ctx, rewritten, "")
+	}
+	return resp, err
+}
+
 // Embed is not supported by the ChatGPT subscription endpoint.
 func (c *Client) Embed(_ context.Context, _ agentmodel.EmbeddingRequest) (agentmodel.EmbeddingResponse, error) {
 	return agentmodel.EmbeddingResponse{}, provider.ErrNotSupported
 }
 
 // Compile-time interface check.
-var _ provider.Provider = (*Client)(nil)
+var (
+	_ provider.Provider                     = (*Client)(nil)
+	_ provider.ResponsesPassthroughProvider = (*Client)(nil)
+)

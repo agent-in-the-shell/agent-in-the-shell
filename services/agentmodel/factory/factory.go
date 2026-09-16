@@ -70,7 +70,7 @@ func BuildDeployments(cfg *agentmodel.Config, logger *slog.Logger) (map[string][
 				// that share a provider string + model but differ in credentials
 				// get distinct Names. Name is the router's cooldown + rate-meter
 				// identity (depKey); a collision would park both on one 429 and
-				// co-mingle their RPM/TPM (#1489), mirroring providerCacheKey's
+				// co-mingle their RPM/TPM, mirroring providerCacheKey's
 				// Name()+AuthMode() disambiguation.
 				Name:     fmt.Sprintf("%s/%s|%s", d.Provider, d.Model, p.AuthMode()),
 				Provider: p,
@@ -104,7 +104,7 @@ func buildDeploymentProvider(d agentmodel.DeploymentConfig, modelName string, lo
 	switch d.AuthMode {
 	case "", agentmodel.AuthModeAPIKey:
 		// Azure routes to a deployment that defaults to the model name; other
-		// providers ignore the Azure fields on providerTarget (#892).
+		// providers ignore the Azure fields on providerTarget.
 		deployment := d.DeploymentName
 		if deployment == "" {
 			deployment = d.Model
@@ -129,7 +129,7 @@ func buildDeploymentProvider(d agentmodel.DeploymentConfig, modelName string, lo
 			// oauth_token_dir(s) take precedence over api_key_env(s): these
 			// credentials refresh themselves, static OAuth bearer tokens expire.
 			// Multiple dirs = one refreshable authenticator per account, rotated
-			// by the pool on rate-limit (#58). A single dir builds the bare
+			// by the pool on rate-limit. A single dir builds the bare
 			// client — a pool of one only adds a cooldown that can park the sole
 			// credential with nothing to fall back to.
 			if dirs := oauthTokenDirs(d); len(dirs) > 0 {
@@ -233,7 +233,7 @@ func oauthTokenDirs(d agentmodel.DeploymentConfig) []string {
 
 // providerTarget bundles the upstream-routing inputs a provider may need: the
 // base_url override (all providers) plus the Azure-only api-version + deployment
-// (#892, ignored elsewhere). Grouping them keeps buildProvider/buildProviderPool
+// (, ignored elsewhere). Grouping them keeps buildProvider/buildProviderPool
 // signatures stable as more endpoint-shaped providers are added.
 type providerTarget struct {
 	baseURL    string
@@ -287,7 +287,7 @@ var staticAuthHeaders = map[string]struct {
 	"anthropic":       {Header: "x-api-key"},
 	"anthropic-oauth": {Header: "x-api-key"},
 	"gemini":          {Header: "x-goog-api-key"},
-	"azure":           {Header: "api-key"}, // Azure OpenAI uses api-key, not Bearer (#892)
+	"azure":           {Header: "api-key"}, // Azure OpenAI uses api-key, not Bearer
 }
 
 // staticAuthFor returns a StaticKey configured for the provider's expected header.
@@ -300,12 +300,12 @@ func staticAuthFor(providerName, token string) *auth.StaticKey {
 
 // buildProvider constructs a provider client for name, pointing it at t.baseURL
 // (via the provider's NewWithBaseURL constructor) when non-empty. The Azure
-// fields on t are used only by the azure case (#892).
+// fields on t are used only by the azure case.
 func buildProvider(name string, auther auth.Authenticator, t providerTarget) (provider.Provider, error) {
 	switch name {
 	case "azure":
 		// Azure OpenAI reuses the openai wire shaping through a deployment-scoped,
-		// api-version'd client (#892). base_url is the resource host (required by
+		// api-version'd client. base_url is the resource host (required by
 		// config validation); deployment is resolved by the caller (defaults to
 		// the model).
 		return azure.New(auther, t.baseURL, t.apiVersion, t.deployment), nil

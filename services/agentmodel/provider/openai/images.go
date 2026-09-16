@@ -1,12 +1,9 @@
 package openai
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel"
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/provider"
@@ -59,7 +56,7 @@ func (c *Client) GenerateImage(ctx context.Context, req agentmodel.ImageRequest)
 		return agentmodel.ImageResponse{}, agentmodel.NewErrorf(agentmodel.ErrTypeInvalidRequest, "openai: prompt required")
 	}
 
-	body, err := json.Marshal(openaiImageRequest{
+	httpResp, err := c.postJSON(ctx, "/images/generations", openaiImageRequest{
 		Model:          req.Model,
 		Prompt:         req.Prompt,
 		N:              req.N,
@@ -67,26 +64,11 @@ func (c *Client) GenerateImage(ctx context.Context, req agentmodel.ImageRequest)
 		Quality:        req.Quality,
 		ResponseFormat: req.ResponseFormat,
 		User:           req.User,
-	})
-	if err != nil {
-		return agentmodel.ImageResponse{}, fmt.Errorf("openai: marshal image request: %w", err)
-	}
-
-	httpReq, err := c.newRequest(ctx, "POST", "/images/generations", bytes.NewReader(body))
+	}, "images-generations")
 	if err != nil {
 		return agentmodel.ImageResponse{}, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := c.http.Do(httpReq)
-	if err != nil {
-		return agentmodel.ImageResponse{}, fmt.Errorf("openai: do image request: %w", err)
-	}
 	defer httpResp.Body.Close()
-	if httpResp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(httpResp.Body)
-		return agentmodel.ImageResponse{}, mapHTTPError(httpResp, respBody)
-	}
 
 	var wire openaiImageResponse
 	if err := json.NewDecoder(httpResp.Body).Decode(&wire); err != nil {

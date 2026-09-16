@@ -14,7 +14,7 @@ import (
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/cost"
 )
 
-// Replicate passthrough (#847). A transparent reverse proxy that speaks
+// Replicate passthrough. A transparent reverse proxy that speaks
 // Replicate's own prediction wire protocol and records one request_logs row per
 // create. It is the Replicate analog of the Anthropic /v1/messages passthrough,
 // with one extra step: the prediction response embeds absolute callback URLs
@@ -40,7 +40,7 @@ func (s *Server) createPrediction(w http.ResponseWriter, r *http.Request) {
 	}
 	modelRequested := replicateRequestedModel(r, body)
 
-	// Pre-request enforcement (#47/#52): budget + the virtual-key allowlist,
+	// Pre-request enforcement: budget + the virtual-key allowlist,
 	// keyed on the fixed "replicate" pseudo-model (a key is granted the
 	// passthrough as a unit, not per upstream Replicate model).
 	if ae := s.enforce(r.Context(), vkFromCtx(r.Context()), replicateProviderName); ae != nil {
@@ -68,7 +68,7 @@ func (s *Server) createPrediction(w http.ResponseWriter, r *http.Request) {
 
 	modelUsed := replicateUsedModel(respBody, modelRequested)
 	status, errType, costSource := replicateOutcome(upstream.StatusCode)
-	// Submit-time per-output cost (#851): for Official Models the billable unit
+	// Submit-time per-output cost: for Official Models the billable unit
 	// is in the request body, so cost is computed here rather than via a
 	// completion poll. Models without a per-output rate stay unpriced.
 	var costUSD float64

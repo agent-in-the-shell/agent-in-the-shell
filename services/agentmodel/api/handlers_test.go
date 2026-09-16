@@ -229,7 +229,7 @@ func TestChatCompletions_NonStreaming(t *testing.T) {
 
 // TestChatCompletions_NonStreaming_BackfillsCreated asserts the handler stamps
 // a non-zero created when the provider left it 0 (the Anthropic adapter does),
-// keeping every provider's response OpenAI-shape-conformant (#664, fix A).
+// keeping every provider's response OpenAI-shape-conformant (, fix A).
 func TestChatCompletions_NonStreaming_BackfillsCreated(t *testing.T) {
 	ts, _ := newTestServer(t, map[string][]router.Deployment{
 		"gpt-4": {{Provider: &stub.Stub{
@@ -416,7 +416,7 @@ func TestChatCompletions_Streaming_SynthesizesFinishReason(t *testing.T) {
 // TestChatCompletions_Streaming_SynthesizedFinishReasonToolAware verifies that
 // when a stream carries tool-call deltas but ends without a finish_reason, the
 // synthesized terminal reason is "tool_calls", not "stop". Defaulting to "stop"
-// mid tool call makes agents drop the pending call (cf. LiteLLM #19744/#12862).
+// mid tool call makes agents drop the pending call (an upstream compatibility concern).
 func TestChatCompletions_Streaming_SynthesizedFinishReasonToolAware(t *testing.T) {
 	idx := 0
 	ts, _ := newTestServer(t, map[string][]router.Deployment{
@@ -469,7 +469,7 @@ func TestChatCompletions_Streaming_SynthesizedFinishReasonToolAware(t *testing.T
 	}
 }
 
-// ─── ChatCompletions: cost source (#511) ─────────────────────────────────
+// ─── ChatCompletions: cost source ─────────────────────────────────
 
 // TestChatCompletions_RecordsCostSource verifies the audit log distinguishes a
 // genuine $0 (subscription) from a price we don't have (unpriced) from a real
@@ -618,7 +618,7 @@ func TestChatCompletions_RequiresMessages(t *testing.T) {
 	}
 }
 
-// ─── Error envelope wire shape (#705) ────────────────────────────────────
+// ─── Error envelope wire shape ────────────────────────────────────
 
 // TestErrorEnvelope_WireShape pins the OpenAI-shaped error body produced by
 // writeError: a non-empty code/param appears with its documented value, and an
@@ -735,7 +735,7 @@ func TestErrorEnvelope_WireShape(t *testing.T) {
 }
 
 // assertErrorKey checks that field is present with want when want != "", or
-// ABSENT (never an empty string) when want == "" — the #705 omitempty contract.
+// ABSENT (never an empty string) when want == "" — the omitempty contract.
 func assertErrorKey(t *testing.T, obj map[string]any, field, want string) {
 	t.Helper()
 	got, present := obj[field]
@@ -756,7 +756,7 @@ func assertErrorKey(t *testing.T, obj map[string]any, field, want string) {
 
 // TestChatCompletions_Streaming_MidStreamErrorFrame verifies a mid-stream
 // failure is surfaced as a `data: {"error":...}` SSE frame whose error object
-// carries the Wrap-classified type and code (#705) — the frame previously
+// carries the Wrap-classified type and code — the frame previously
 // hardcoded type=upstream_error with no code. When the error is unclassifiable
 // the code key is omitted rather than emitted as "".
 func TestChatCompletions_Streaming_MidStreamErrorFrame(t *testing.T) {
@@ -1032,7 +1032,7 @@ func TestChatGPTOAuthStart_ReturnsNotFoundWhenUnconfigured(t *testing.T) {
 	resp := mustPost(t, ts, "/v1/oauth/chatgpt/start", map[string]any{}, testToken)
 	defer resp.Body.Close()
 	// 404 to match the not_found_error type — it previously sent 501 (whose
-	// not_found type mapped to 404, a status/type contradiction, #1494).
+	// not_found type mapped to 404, a status/type contradiction, ).
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status: got %d, want 404", resp.StatusCode)
 	}
@@ -1206,7 +1206,7 @@ func TestChatGPTOAuthPoll_UpstreamFailure(t *testing.T) {
 	}
 }
 
-// TestChatCompletions_FailureRowNamesDeployment guards #1492: a terminal
+// TestChatCompletions_FailureRowNamesDeployment guards : a terminal
 // upstream failure on /v1/chat/completions must audit with the FAILING
 // deployment's provider/auth_mode and the upstream model id — matching the
 // /v1/messages path. Before the fix the router discarded the deployment on a

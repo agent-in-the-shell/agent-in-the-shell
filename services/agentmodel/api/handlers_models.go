@@ -25,7 +25,7 @@ const discoverTimeout = 5 * time.Second
 // a "configured" flag (true for the routable surface, false for discovered
 // models). The default response (no ?available) is byte-identical to before and
 // never includes unroutable models, so a client can always call every id it
-// sees in the default list (#526).
+// sees in the default list.
 func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 	type model struct {
 		ID         string `json:"id"`
@@ -39,11 +39,19 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 		Data   []model `json:"data"`
 	}
 
-	available := r.URL.Query().Has("available")
-	out := response{Object: "list"}
+	vk := vkFromCtx(r.Context())
+	// Employee discovery is limited to routable aliases in the live policy,
+	// never unconfigured upstream account inventory.
+	available := r.URL.Query().Has("available") && !(vk != nil && vk.portalIssued)
+	out := response{Object: "list", Data: []model{}}
 	now := time.Now().Unix()
 	if s.router != nil {
 		for _, m := range s.router.Models() {
+			// Any allowlisted key sees only what it may call; the same predicate
+			// enforce() applies on the request itself.
+			if !vk.allowsModel(m.Name) {
+				continue
+			}
 			row := model{ID: m.Name, Object: "model", Created: now, OwnedBy: m.Provider}
 			if available {
 				yes := true

@@ -108,7 +108,7 @@ func TestVideoGenerations_SubmitAndPoll(t *testing.T) {
 		t.Fatalf("unexpected poll op: %+v", poll)
 	}
 	// The result URL is rewritten to a gateway content URL the client can fetch
-	// with its own bearer (#1493), not the raw upstream asset that would 401.
+	// with its own bearer, not the raw upstream asset that would 401.
 	wantSuffix := "/v1/videos/" + op.ID + "/content?index=0"
 	if !strings.HasSuffix(poll.Videos[0].URL, wantSuffix) {
 		t.Errorf("video url = %q, want a gateway content URL ending %q", poll.Videos[0].URL, wantSuffix)
@@ -118,7 +118,7 @@ func TestVideoGenerations_SubmitAndPoll(t *testing.T) {
 	}
 }
 
-// TestVideoContent_ProxiesBytes guards #1493: GET /v1/videos/{id}/content
+// TestVideoContent_ProxiesBytes guards : GET /v1/videos/{id}/content
 // streams the asset bytes fetched with the gateway's provider credential, so a
 // client that holds only the gateway bearer can retrieve the video.
 func TestVideoContent_ProxiesBytes(t *testing.T) {

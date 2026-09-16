@@ -408,7 +408,7 @@ func TestStream_SSEEventsTranslatedToDeltas(t *testing.T) {
 }
 
 // TestStream_ToolCall_FirstFragmentOnly asserts the OpenAI-conformant streamed
-// tool-call shape (issue #664, fix B): id/type/name appear exactly once, on the
+// tool-call shape (issue , fix B): id/type/name appear exactly once, on the
 // first fragment; every fragment carries an integer index; later fragments carry
 // only {index, arguments}. Re-sending id/name on every fragment (the old bug)
 // makes the official OpenAI accumulators concatenate "get_weatherget_weather".
@@ -664,7 +664,7 @@ func TestListModelsAdditionalBranches(t *testing.T) {
 }
 
 // TestNormalizeToolChoice covers the OpenAI -> Anthropic tool_choice mapping,
-// including the two shapes that 400 on Anthropic when left untranslated (#664):
+// including the two shapes that 400 on Anthropic when left untranslated:
 // "required" and the named-function object form.
 func TestNormalizeToolChoice(t *testing.T) {
 	cases := []struct {
@@ -699,7 +699,7 @@ func TestNormalizeToolChoice(t *testing.T) {
 }
 
 // TestMapStopReason covers the clamp of Anthropic stop_reason onto OpenAI's
-// closed finish_reason enum (#664, fix C): unknown values become "stop".
+// closed finish_reason enum (, fix C): unknown values become "stop".
 func TestMapStopReason(t *testing.T) {
 	cases := map[string]string{
 		"end_turn":                      "stop",
@@ -753,7 +753,7 @@ func TestTranslationEdgeBranches(t *testing.T) {
 		t.Fatalf("mapStopReason(stop_sequence) = %q", got)
 	}
 	// Unknown stop reasons clamp to "stop" rather than leaking a non-OpenAI
-	// value that a strict client would reject (#664, fix C).
+	// value that a strict client would reject (, fix C).
 	if got := mapStopReason("custom"); got != "stop" {
 		t.Fatalf("mapStopReason(custom) = %q, want stop (clamped)", got)
 	}

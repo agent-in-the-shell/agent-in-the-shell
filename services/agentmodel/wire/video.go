@@ -1,6 +1,6 @@
 package wire
 
-// Video generation (issue #841). Unlike chat, embeddings, and image generation
+// Video generation. Unlike chat, embeddings, and image generation
 // — all synchronous — every video provider is asynchronous: the gateway submits
 // a job and the client polls until it reaches a terminal status. The provider
 // seam is provider.VideoGenerator (SubmitVideo + PollVideo); the HTTP surface is
@@ -54,10 +54,10 @@ type VideoOperation struct {
 // VideoResult is one generated video. URL points at the playable asset. On the
 // GET /v1/videos/{id} surface it is a gateway content URL
 // (/v1/videos/{id}/content?index=N) the client fetches with its own bearer; the
-// gateway proxies the bytes from the upstream with the provider credential
-// (#1493). Persisting the bytes to durable gateway-hosted storage — rather than
+// gateway proxies the bytes from the upstream with the provider credential.
+// Persisting the bytes to durable gateway-hosted storage — rather than
 // re-fetching the (expiring) upstream asset on each request — remains a
-// follow-up (#841).
+// follow-up.
 type VideoResult struct {
 	URL      string `json:"url,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`

@@ -122,7 +122,7 @@ func TestSubmitVideo_Validation(t *testing.T) {
 }
 
 // TestDownloadVideo_AppliesAuthAndStreams: the asset fetch carries the
-// provider credential (x-goog-api-key) and streams the bytes back (#1493).
+// provider credential (x-goog-api-key) and streams the bytes back.
 func TestDownloadVideo_AppliesAuthAndStreams(t *testing.T) {
 	var gotKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

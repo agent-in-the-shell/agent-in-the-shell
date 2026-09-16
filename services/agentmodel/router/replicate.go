@@ -8,7 +8,7 @@ import (
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/provider"
 )
 
-// Replicate passthrough dispatch (#847). Unlike chat/video/image, the Replicate
+// Replicate passthrough dispatch. Unlike chat/video/image, the Replicate
 // model lives in the request BODY (a "version" hash or "owner/name"), not in a
 // configured model_name, so there is no model-name routing and no fallback
 // graph (Replicate models aren't interchangeable). The gateway has a single

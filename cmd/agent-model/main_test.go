@@ -30,7 +30,13 @@ func TestMainExitBranches(t *testing.T) {
 		{name: "unknown", args: []string{"agent-model", "nope"}, wantCode: 2, wantStderr: "unknown command"},
 		{name: "migrate", args: []string{"agent-model", "migrate"}, wantCode: 1, wantStderr: "migrate failed"},
 		{name: "purge", args: []string{"agent-model", "purge"}, wantCode: 1, wantStderr: "purge failed"},
-		{name: "filter", args: []string{"agent-model", "filter"}, wantCode: 1, wantStderr: "filter failed"},
+		{
+			name:       "prompt",
+			args:       []string{"agent-model", "prompt"},
+			setup:      func(t *testing.T) { t.Setenv("AGENT_MODEL_URL", "http://127.0.0.1:1") },
+			wantCode:   1,
+			wantStderr: "prompt failed",
+		},
 		{
 			name:       "usage",
 			args:       []string{"agent-model", "usage"},
@@ -127,7 +133,6 @@ func TestMainSuccessBranches(t *testing.T) {
 		wantStdout string
 	}{
 		{name: "help", args: []string{"agent-model", "--help"}, wantStdout: "agent-model"},
-		{name: "schema", args: []string{"agent-model", "schema"}, wantStdout: "inputSchema"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			oldArgs := os.Args
@@ -327,11 +332,24 @@ func (s *revalidationStub) ListModels(context.Context) ([]string, error) {
 	return append([]string(nil), s.live...), nil
 }
 
+// Failure timeouts, not budgets. Every use below sits in a select/poll that
+// exits the instant the awaited thing happens, so a generous bound costs a
+// passing run nothing and only decides how long a genuinely stuck run waits
+// before failing. They were 1-2s, which is not enough headroom on a loaded CI
+// runner: runServeContext does LoadConfig + cost.LoadDefault + store.OpenSQLite
+// (creating the DB file) + factory.BuildDeployments before it ever listens.
+// TestRunServeContextStartsAndStops flaked on exactly that in a previous run.
+const (
+	waitStartup  = 30 * time.Second
+	waitShutdown = 10 * time.Second
+	waitSignal   = 10 * time.Second
+)
+
 func waitRevalidationCall(t *testing.T, calls <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-calls:
-	case <-time.After(time.Second):
+	case <-time.After(waitSignal):
 		t.Fatal("timed out waiting for deployment revalidation")
 	}
 }
@@ -476,7 +494,7 @@ model_list:
 	}()
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(waitStartup)
 	for {
 		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
 		if err == nil {
@@ -500,7 +518,7 @@ model_list:
 		if err != nil {
 			t.Fatalf("runServeContext returned error: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitShutdown):
 		t.Fatal("runServeContext did not stop after cancellation")
 	}
 }

@@ -12,7 +12,7 @@
 // truncates content.
 //
 // Rotation. Agentic clients resend the whole conversation every turn, so the
-// file grows fast; left unbounded it once filled the agent-model disk (#1399).
+// file grows fast; left unbounded it once filled the agent-model disk.
 // Open accepts Options that rotate the active file by size and/or age, gzip the
 // rotated files, and prune them by count, age, or total bytes. Rotation happens
 // under the same lock that serializes writes, so an in-flight line is never
@@ -29,9 +29,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/agent-in-the-shell/agent-in-the-shell/internal/herospath"
 )
 
 // Record is one logged request/response exchange. It is deliberately minimal:
@@ -118,22 +121,57 @@ func Open(path string) (*Logger, error) {
 
 // OpenWithOptions opens the JSONL file at path with the given rotation,
 // compression, and retention policy. An empty or whitespace path returns
-// (nil, nil): content logging disabled. The file is created 0600 since it holds
-// raw prompt/response content.
+// (nil, nil): content logging disabled. The file is 0600 since it holds raw
+// prompt/response content — enforced on an already-existing file too, not only
+// at creation (see openActive), and an open that cannot reach 0600 fails rather
+// than proceeding.
 func OpenWithOptions(path string, opts Options) (*Logger, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, nil
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, size, err := openActive(path)
 	if err != nil {
 		return nil, fmt.Errorf("contentlog: open %q: %w", path, err)
 	}
-	l := &Logger{f: f, path: path, opts: opts, now: time.Now}
-	if fi, err := f.Stat(); err == nil {
-		l.size = fi.Size()
-	}
+	l := &Logger{f: f, path: path, opts: opts, now: time.Now, size: size}
 	l.rotatedAt = l.now()
+	l.tightenBackups()
 	return l, nil
+}
+
+// tightenBackups forces the rotated files to 0600 as well.
+//
+// openActive covers the active file, but a rotated backup holds exactly the
+// same raw prompts and completions and nothing else ever revisits it —
+// enforceRetention only deletes. So a backup left 0644 by an external rotator,
+// a restore from an archive, or an older service version remains exposed
+// unless its mode is explicitly tightened.
+//
+// Best-effort rather than fatal, unlike the active file: a backup we cannot
+// chmod is content already exposed, and refusing to start protects nothing
+// that is still to be written. The failure goes to OnError, the same channel
+// compression and retention failures use.
+func (l *Logger) tightenBackups() {
+	backups, err := l.listBackups()
+	if err != nil {
+		l.reportError(fmt.Errorf("contentlog: list backups to secure: %w", err))
+		return
+	}
+	for _, b := range backups {
+		if err := os.Chmod(b.path, 0o600); err != nil {
+			l.reportError(fmt.Errorf("contentlog: secure backup %q: %w", b.path, err))
+		}
+	}
+}
+
+// openActive opens the active log for appending and guarantees it is 0600,
+// returning its current size.
+//
+// The rule lives in herospath.OpenSecureAppend; see there for why an existing
+// file has to be chmod-ed, why a mode we cannot set is fatal, and which other
+// openers have hit the same trap.
+func openActive(path string) (*os.File, int64, error) {
+	return herospath.OpenSecureAppend(path)
 }
 
 // Enabled reports whether content logging is on. Guard expensive work (e.g.
@@ -254,15 +292,12 @@ func free(name string) bool {
 // reopen (re)opens the active file at l.path and resyncs the size/age trackers
 // from its current state. Caller holds l.mu.
 func (l *Logger) reopen() error {
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, size, err := openActive(l.path)
 	if err != nil {
 		return fmt.Errorf("contentlog: rotate reopen: %w", err)
 	}
 	l.f = f
-	l.size = 0
-	if fi, err := f.Stat(); err == nil {
-		l.size = fi.Size()
-	}
+	l.size = size
 	l.rotatedAt = l.now()
 	return nil
 }
@@ -308,46 +343,88 @@ func compress(src string) (string, error) {
 type backupInfo struct {
 	path string
 	size int64
-	mod  time.Time // rotation time (parsed from the name, else file mtime)
+	mod  time.Time // rotation time, parsed from the name
 }
 
 // listBackups returns the rotated files for this log, oldest first. Caller holds
 // l.mu.
 func (l *Logger) listBackups() ([]backupInfo, error) {
-	matches, err := filepath.Glob(l.path + ".*")
+	// ReadDir, not Glob. l.path is operator-supplied config, and interpolating
+	// it into a glob pattern means a directory whose name contains a
+	// metacharacter enumerates somewhere else entirely: "/logs/agent[1]" reads
+	// as the character class [1], so the pattern matched a sibling
+	// "/logs/agent1" while never seeing this log's own backups — retention then
+	// silently pruned nothing and the log grew without bound.
+	//
+	// It also leaves backupTime as the single authority on what belongs to this
+	// log, instead of splitting that decision between a pattern and a parser.
+	dir := filepath.Dir(l.path)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]backupInfo, 0, len(matches))
-	for _, m := range matches {
-		if m == l.path {
-			continue
+	out := make([]backupInfo, 0, len(entries))
+	for _, e := range entries {
+		// Identity first: it is pure string work, and it rejects the active file
+		// itself along with every neighbour, so a directory an external rotator
+		// also writes into does not cost a stat per archive to skip.
+		full := filepath.Join(dir, e.Name())
+		mod, ok := l.backupTime(full)
+		if !ok {
+			continue // not one of ours — see backupTime
 		}
-		fi, err := os.Stat(m)
+		fi, err := e.Info()
 		if err != nil || fi.IsDir() {
 			continue
 		}
-		out = append(out, backupInfo{path: m, size: fi.Size(), mod: l.backupTime(m, fi)})
+		out = append(out, backupInfo{path: full, size: fi.Size(), mod: mod})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].mod.Before(out[j].mod) })
 	return out, nil
 }
 
-// backupTime recovers a rotated file's rotation instant from its timestamped
-// name, falling back to the file's mtime if the name doesn't parse.
-func (l *Logger) backupTime(path string, fi os.FileInfo) time.Time {
-	name := strings.TrimPrefix(path, l.path+".")
+// backupTime reports whether path is one of THIS log's rotated files and, if so,
+// the rotation instant its name encodes.
+//
+// The boolean is the point. The glob in listBackups matches on path prefix
+// alone, so it also picks up whatever else happens to sit beside the active log
+// — an operator's hand-made copy, an external logrotate's .1/.2.gz — and every
+// caller of this is deciding what retention may os.Remove. Treating an
+// unparseable name as a backup dated by its mtime (which is what this used to
+// do) hands those files to the pruner, in the one directory where unredacted
+// prompts and completions live. Anything we cannot positively identify
+// as our own is left alone.
+//
+// Accepted shape, exactly what uniqueBackupName and compress produce:
+// <path>.<backupTimeLayout>Z, optionally "-N", optionally ".gz".
+func (l *Logger) backupTime(path string) (time.Time, bool) {
+	name, ok := strings.CutPrefix(path, l.path+".")
+	if !ok {
+		return time.Time{}, false
+	}
 	name = strings.TrimSuffix(name, ".gz")
-	// Drop any "-N" disambiguation suffix (the layout itself has no '-'), then
-	// the literal UTC "Z", before parsing.
+	// The "-N" uniqueness counter is the only '-' our names can carry; the
+	// layout has none. ParseUint is the check that matches what uniqueBackupName
+	// writes: it takes unsigned decimal only, so a foreign "…-backup" cannot
+	// truncate its way down to a parseable prefix, and unlike Atoi it will not
+	// accept a signed "…-+1" either.
 	if i := strings.LastIndexByte(name, '-'); i >= 0 {
+		if _, err := strconv.ParseUint(name[i+1:], 10, 64); err != nil {
+			return time.Time{}, false
+		}
 		name = name[:i]
 	}
-	name = strings.TrimSuffix(name, "Z")
-	if t, err := time.Parse(backupTimeLayout, name); err == nil {
-		return t
+	// Rotation always appends the literal UTC marker, so a name without it did
+	// not come from us.
+	stamp, ok := strings.CutSuffix(name, "Z")
+	if !ok {
+		return time.Time{}, false
 	}
-	return fi.ModTime()
+	t, err := time.Parse(backupTimeLayout, stamp)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // enforceRetention prunes rotated files per the count, age, and total-size

@@ -3,8 +3,7 @@
 // Codex OAuth token is rejected by /v1/images/generations with a missing
 // api.model.images.request scope), but the same Responses backend used for
 // chat can drive the image_generation tool as an agent tool, reaching
-// gpt-image-2-codex and billing to subscription quota. See issue #1055 for
-// the verified POC this implementation mirrors.
+// gpt-image-2-codex and billing to subscription quota.
 package chatgpt
 
 import (
@@ -24,7 +23,7 @@ import (
 var _ provider.ImageGenerator = (*Client)(nil)
 
 // defaultImageGenModel is the model id the image_generation tool reports
-// (response.tools[].model) as of issue #1055's POC. Used only as a fallback
+// (response.tools[].model) as of issue 's POC. Used only as a fallback
 // when that field is absent from the response — the resolved value from the
 // wire response is always preferred.
 const defaultImageGenModel = "gpt-image-2-codex"
@@ -205,6 +204,7 @@ func readImageStream(httpResp *http.Response) (agentmodel.ImageResponse, error) 
 					PromptTokens:         ev.Response.Usage.InputTokens,
 					CompletionTokens:     ev.Response.Usage.OutputTokens,
 					TotalTokens:          ev.Response.Usage.TotalTokens,
+					ReasoningTokens:      ev.Response.Usage.OutputTokensDetails.ReasoningTokens,
 					CacheReadInputTokens: ev.Response.Usage.cachedTokens(),
 					AuthMode:             agentmodel.AuthModeSubscription,
 				},
@@ -271,7 +271,7 @@ func (c *Client) GenerateImage(ctx context.Context, req agentmodel.ImageRequest)
 	}
 
 	// Image generation is a one-shot request with no conversational prefix to
-	// cache, so it sends no session-id (issue #1279 stickiness is for chat turns).
+	// cache, so it sends no session-id (session stickiness is for chat turns).
 	httpResp, err := c.doStream(ctx, body, "")
 	if err != nil && c.recoverExpiredToken(ctx, err) {
 		httpResp, err = c.doStream(ctx, body, "")
