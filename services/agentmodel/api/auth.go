@@ -25,7 +25,7 @@ const (
 )
 
 // defaultOrgID is the single tenant everything is attributed to. Virtual keys
-// (#52) authenticate independently but still spend against this org's budget.
+// authenticate independently but still spend against this org's budget.
 const defaultOrgID = "default"
 
 // resolvedKey is a virtual key (config `keys`) in its single runtime
@@ -34,12 +34,14 @@ const defaultOrgID = "default"
 // unparseable window) can never match an incoming token — fail-closed — but
 // keeps its configured cap so /v1/limits still reports it.
 type resolvedKey struct {
-	name     string
-	token    string
-	hash     string // sha256 hex of token; matches RequestLog.APIKeyHash
-	cap      *spendCap
-	models   map[string]bool // nil = all models allowed
-	disabled bool
+	portalIssued  bool
+	serviceIssued bool
+	name          string
+	token         string
+	hash          string // sha256 hex of token; matches RequestLog.APIKeyHash
+	cap           *spendCap
+	models        map[string]bool // nil = all models allowed
+	disabled      bool
 }
 
 // resolveKeys materializes every configured virtual key, reading each token
@@ -75,7 +77,7 @@ func resolveKeys(keys []agentmodel.KeyConfig, logger *slog.Logger) []resolvedKey
 	return out
 }
 
-// resolvedKeyFromManaged adapts a DB-backed managed key (#922) into the same
+// resolvedKeyFromManaged adapts a DB-backed managed key into the same
 // runtime representation as a config key, so model-allowlist + budget
 // enforcement and audit attribution all flow through the existing path. The
 // token plaintext is never available here (only its hash is stored), so the
@@ -124,7 +126,7 @@ func (k *resolvedKey) allowsModel(model string) bool {
 // Anthropic SDK clients send x-api-key; OpenAI SDK clients send Authorization Bearer.
 //
 // The token is matched against the master bearer token first, then each
-// resolved virtual key (#52). Each individual comparison is constant-time in
+// resolved virtual key. Each individual comparison is constant-time in
 // the token contents (subtle.ConstantTimeCompare still returns early on
 // length mismatch, so secret *lengths* are observable — accepted: lengths of
 // our tokens are not secret). Iterating the key list additionally leaks at
@@ -168,7 +170,7 @@ func (s *Server) bearerAuth(next http.Handler) http.Handler {
 				}
 			}
 		}
-		// DB-backed managed keys (#922) are tried last, only when the master
+		// DB-backed managed keys are tried last, only when the master
 		// token and every config key miss: operator/legacy credentials win,
 		// and an invalid token costs one indexed lookup. Unlike config keys
 		// (matched by constant-time compare on plaintext we hold), a managed
@@ -178,7 +180,7 @@ func (s *Server) bearerAuth(next http.Handler) http.Handler {
 			mk, err := s.store.GetKeyByHash(r.Context(), incomingHash)
 			switch {
 			case err == nil:
-				if mk.Disabled || keyExpired(mk, time.Now()) {
+				if mk.RevokedAt != nil || mk.Disabled || keyExpired(mk, time.Now()) {
 					// Revoked or expired: reject as a plain invalid token below;
 					// don't reveal that the key once existed.
 					break
@@ -192,6 +194,20 @@ func (s *Server) bearerAuth(next http.Handler) http.Handler {
 					writeError(w, http.StatusServiceUnavailable, &agentmodel.Error{Type: agentmodel.ErrTypeServiceUnavailable, Code: agentmodel.CodeAuthUnavailable,
 						Message: "key configured but currently unenforceable; request rejected (fail-closed)"})
 					return
+				}
+				rk.portalIssued = mk.PortalIssued
+				rk.serviceIssued = mk.ServiceIssued
+				if mk.PortalIssued || mk.ServiceIssued {
+					if !store.PortalPolicyOK(mk) {
+						portalError(w, http.StatusForbidden, "unsupported_key_policy")
+						return
+					}
+					// Employee/service empty/nil allowlists deny all, unlike legacy keys, so the
+					// nil-means-all sentinel from buildModelSet becomes an empty set.
+					// Read per request: edits affect models and fallback immediately.
+					if rk.models = buildModelSet(mk.Models); rk.models == nil {
+						rk.models = map[string]bool{}
+					}
 				}
 				vk = rk
 				matched = true
@@ -230,6 +246,27 @@ func vkFromCtx(ctx context.Context) *resolvedKey {
 // masterOnly rejects virtual keys: the wrapped routes carry operator
 // authority (e.g. rebinding upstream OAuth credentials), which a tenant key
 // must never hold regardless of its budget or model allowlist.
+// Employee (portal-issued) and explicit service keys may infer synchronously
+// and list models, never
+// inspect shared provider accounts, organization usage or unscoped async job
+// IDs. The policy is expressed where routes are registered: every /v1 route is
+// wrapped in exactly one of employeeKeysAllowed or operatorKeysOnly (masterOnly
+// implies the latter), and TestEveryV1RouteClassifiesEmployeeKeys walks the
+// router to prove it, so a new route cannot fall into either bucket silently.
+func (s *Server) employeeKeysAllowed(next http.Handler) http.Handler {
+	return next
+}
+
+func (s *Server) operatorKeysOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if vk := vkFromCtx(r.Context()); vk != nil && (vk.portalIssued || vk.serviceIssued) {
+			writeError(w, http.StatusForbidden, &agentmodel.Error{Type: agentmodel.ErrTypePermissionDenied, Code: agentmodel.CodeMasterRequired, Message: "endpoint unavailable to employee or service keys"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) masterOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if vk := vkFromCtx(r.Context()); vk != nil {
@@ -237,7 +274,7 @@ func (s *Server) masterOnly(next http.Handler) http.Handler {
 				Message: "this endpoint requires the master bearer token"})
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(store.WithKeyActor(r.Context(), store.KeyActor{Kind: "master", ID: "shared-master"})))
 	})
 }
 

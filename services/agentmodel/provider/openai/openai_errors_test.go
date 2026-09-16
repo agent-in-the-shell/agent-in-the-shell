@@ -157,8 +157,10 @@ func TestComplete_NetworkError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected network error")
 	}
-	if !strings.Contains(err.Error(), "do request") {
-		t.Errorf("err = %q, want substring 'do request'", err.Error())
+	// The op label send stamps on transport failures. Complete's message used
+	// to be a bare "do request", the one call site with no name in it.
+	if !strings.Contains(err.Error(), "openai: chat-completions:") {
+		t.Errorf("err = %q, want the endpoint label 'openai: chat-completions:'", err.Error())
 	}
 }
 
@@ -241,8 +243,8 @@ func TestEmbed_NetworkError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected network error")
 	}
-	if !strings.Contains(err.Error(), "do embed request") {
-		t.Errorf("err = %q, want substring 'do embed request'", err.Error())
+	if !strings.Contains(err.Error(), "openai: embeddings:") {
+		t.Errorf("err = %q, want the endpoint label 'openai: embeddings:'", err.Error())
 	}
 }
 

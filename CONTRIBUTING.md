@@ -1,29 +1,38 @@
 # Contributing
 
-Thank you for your interest in Agent in the Shell.
+Issues and pull requests are welcome in this repository.
 
-## This is a read-only mirror
+## Local checks
 
-This repository is **generated** from a private monorepo, which is the source of
-truth. Code is copied here by an automated export tool at release time. As a
-result:
+Use the Go version declared in go.mod. Tests use fake upstreams and temporary
+state by default; do not enable live provider tests for routine changes.
 
-- **Issues are welcome** — bug reports, feature requests, and questions all help.
-- **Pull requests cannot be merged here** — changes to this repo would be
-  overwritten by the next export. If you have a fix, please open an issue
-  describing it (a patch or diff in the issue body is very welcome), and we will
-  port it into the monorepo with attribution.
+```sh
+gofmt -l .
+go build ./...
+go test -race ./...
+go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+staticcheck ./...
+go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+govulncheck ./...
+node --test services/agentmodel/api/portal_ui_test.mjs
+```
 
-We may revisit accepting external PRs after launch.
+Node.js 22 or newer is needed only for the portal's dependency-free UI tests.
+Go builds do not require Node.js. Run actionlint when changing workflows.
 
-## Reporting bugs
+## Pull requests
 
-Open an issue with:
+Describe the problem, resulting behavior and relevant validation. Update the
+service reference, configuration examples and agent-facing usage document when
+changing the CLI, API or persistence contract. Keep each PR focused on one change.
+Link public issues when they provide useful context; explain design decisions
+in the PR so readers do not need access to another repository.
 
-- the service and release tag (e.g. `agent-model` at `v0.1.0`),
-- your OS and architecture,
-- the exact command you ran and what happened vs. what you expected.
+For bugs, include the service/version, OS/architecture, reproduction command,
+expected behavior and actual result. Replace credentials and personal data in
+logs with placeholders.
 
-## Security
+## Security reports
 
-Please report security issues privately — see [SECURITY.md](SECURITY.md).
+Report suspected vulnerabilities privately following [SECURITY.md](SECURITY.md).

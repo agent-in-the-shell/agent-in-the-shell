@@ -295,7 +295,10 @@ func writeStatusJSON(w io.Writer, rep statusReport) error {
 		})
 	}
 	for _, r := range rep.Routing {
-		out.Routing = append(out.Routing, routeJSON{Model: r.Model, Provider: r.Provider, Backend: r.Backend, Status: r.Status})
+		// routeJSON is routeRow plus json tags, so a conversion says "same shape,
+		// different encoding" without relisting the fields — and a field added to
+		// routeRow then fails to compile here instead of being silently dropped.
+		out.Routing = append(out.Routing, routeJSON(r))
 	}
 	out.Healthy = rep.Healthy
 	out.Problems = rep.Problems

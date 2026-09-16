@@ -102,7 +102,7 @@ type VideoGenerator interface {
 // result asset URLs require the gateway's provider credential to fetch (Veo's
 // do). The gateway proxies GET /v1/videos/{id}/content through this so a client
 // — which holds only the gateway bearer, not the upstream credential — can
-// retrieve the bytes instead of receiving a URL it would 401 on (#1493).
+// retrieve the bytes instead of receiving a URL it would 401 on.
 type VideoDownloader interface {
 	// DownloadVideo fetches the asset at assetURL using the provider's
 	// credential and returns a stream of its bytes plus the content type. The
@@ -119,6 +119,17 @@ type PassthroughProvider interface {
 	// the upstream and returns the raw HTTP response. The caller MUST close the
 	// response body. modelOverride rewrites the body's "model" field if non-empty.
 	MessagesPassthrough(ctx context.Context, body []byte, modelOverride, clientBetas string) (*http.Response, error)
+}
+
+// ResponsesPassthroughProvider is an optional interface implemented by providers
+// that expose an OpenAI Responses API without translating it through Chat
+// Completions. The gateway uses it for hosted tools whose wire events cannot be
+// represented by the normalized Provider stream (for example web_search).
+type ResponsesPassthroughProvider interface {
+	// ResponsesPassthrough forwards a Responses request using the provider's own
+	// credential. modelOverride replaces the caller's logical model. The caller
+	// must close the returned response body.
+	ResponsesPassthrough(ctx context.Context, body []byte, modelOverride string) (*http.Response, error)
 }
 
 // ReplicateProxy is an optional interface implemented by providers that proxy

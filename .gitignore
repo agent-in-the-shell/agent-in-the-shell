@@ -1,5 +1,10 @@
 # Local state the quick start creates in the checkout.
 config.yaml
+
+# Local agent-model configurations and VM snapshots at the repo root.
+/agentmodel.yaml
+/agentmodel.*.yaml
+
 *.db
 *.db-journal
 *.db-wal
@@ -7,3 +12,39 @@ config.yaml
 
 # Build output.
 dist/
+
+# Build output. `go build -o build/ ./cmd/...` is the documented form.
+#
+# Deliberately no per-binary names here: they would only ever cover the cmds
+# somebody remembered to list, and .gitignore is powerless once a file is
+# already tracked. `internal/repoguard` enforces "no compiled artifacts under
+# version control" — that is the actual guarantee; this line is only ergonomics.
+/build/
+
+# macOS Finder metadata. Turns up in whatever directory somebody browsed, so
+# a path-scoped rule would only ever cover the ones we already tripped over.
+.DS_Store
+
+# Coverage profile. `go test -coverprofile=coverage.out ./...` is the form the
+# CI gate and the local loop both use.
+coverage.out
+
+# Credential drops at the repo root. Never reached any ref so far — this keeps
+# a stray `git add -A` from being the first time. Ignoring it is not storage
+# advice: a live bot token in the checkout is still a token on disk.
+.telegram
+
+# git worktrees created inside the checkout. Both locations are in use here
+# (36 under .claude/, one under .worktrees/) and each carries a full second
+# copy of the tree, so leaving them visible makes `git status` useless.
+.worktrees/
+.claude/worktrees/
+
+# Per-machine Claude Code state. `.claude/settings.json` is the shared half and
+# stays tracked; these two are local and would only ever conflict.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Scratch state from the superpowers skills (brainstorm notes, sdd briefs and
+# review diffs). Session working material, not a repo artifact.
+.superpowers/

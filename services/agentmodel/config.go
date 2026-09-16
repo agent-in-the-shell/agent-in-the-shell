@@ -50,6 +50,7 @@ type Config struct {
 	Fallbacks  []FallbackRule   `yaml:"fallbacks"`
 	Budget     BudgetConfig     `yaml:"budget,omitempty"`
 	Keys       []KeyConfig      `yaml:"keys,omitempty"`
+	Portal     PortalConfig     `yaml:"portal,omitempty"`
 	Telemetry  TelemetryConfig  `yaml:"telemetry"`
 	Retention  RetentionConfig  `yaml:"retention"`
 	ContentLog ContentLogConfig `yaml:"content_log,omitempty"`
@@ -276,11 +277,10 @@ func (c *Config) RevalidateIntervalDuration() (time.Duration, bool, error) {
 //
 // Caveat: caps meter registry-priced spend only. A model missing from the
 // price catalog logs cost $0 with cost_source="unpriced" and never advances
-// any cap — keep the price registry in sync (cost/cmd/syncprices) and watch
+// any cap — keep the price registry in sync and watch
 // the agentmodel_cost_source_total{source="unpriced"} metric.
 //
-// Enforcement (#47/#52) is live on the spending endpoints; live
-// used/remaining reporting on /v1/limits is #500.
+// Spending endpoints enforce budgets; /v1/limits reports used and remaining caps.
 type BudgetConfig struct {
 	// nil = no cap. Pointer prevents silent-zero: YAML unmarshals a missing
 	// field to 0 for plain float64, which is indistinguishable from "block all".
@@ -296,9 +296,7 @@ func (b BudgetConfig) Window() (time.Duration, bool, error) {
 
 // KeyConfig declares one virtual API key: a named bearer token (read from
 // token_env) with optional per-key spend cap and model allowlist. The schema
-// is the multi-tenancy contract: auth-by-key is wired in #52 and budget
-// enforcement in #47; until then keys are validated and their caps reported
-// on /v1/limits, but the gateway still authenticates only the master token.
+// describes environment-backed virtual-key authentication and budget policy.
 //
 //	keys:
 //	  - name: "ci"
@@ -307,7 +305,7 @@ func (b BudgetConfig) Window() (time.Duration, bool, error) {
 //	    budget_duration: "24h"  # optional; empty = lifetime (requires max_budget)
 //	    models: ["gpt-4"]       # optional allowlist of model_names; omit = all
 //
-// Two contract details #52 must honor. First, models is a hard authorization
+// Two contract details  must honor. First, models is a hard authorization
 // boundary INCLUDING fallbacks: when a request from this key falls back
 // (config `fallbacks`), targets outside the allowlist are skipped, never
 // served — fallbacks shrink availability for a restricted key, they never
@@ -416,7 +414,7 @@ type DeploymentConfig struct {
 	// upstream. When set, api_key_env/api_key_envs become optional (a keyless
 	// backend builds with an empty static key).
 	BaseURL string `yaml:"base_url,omitempty"`
-	// Azure OpenAI only (#892). APIVersion is the required Azure api-version query
+	// Azure OpenAI only. APIVersion is the required Azure api-version query
 	// value (e.g. 2024-10-01-preview). DeploymentName is the Azure deployment that
 	// backs this model; when empty it defaults to Model. Both are ignored by every
 	// other provider. For provider: azure, base_url is the resource host
@@ -453,16 +451,36 @@ type FallbackRule struct {
 }
 
 // DefaultConfigPath returns the config path used when none is given on the
-// command line: $AGENT_MODEL_CONFIG if set, else ~/.config/agentmodel/config.yaml.
+// command line. Order: $AGENT_MODEL_CONFIG (full-path operator override) → the
+// canonical ${XDG_CONFIG_HOME:-~/.config}/heros/agentmodel/config.yaml, falling
+// back IN PLACE to an existing legacy ~/.config/agentmodel/config.yaml — the
+// same shape DBPath already uses, so an existing install never has its config
+// moved out from under it and a fresh one converges on the canonical layout.
+//
+// It previously built ~/.config/agentmodel/config.yaml by hand and never called
+// herospath. Two consequences, both silent: the file sat outside the
+// heros/ tree every other resolved path uses, and XDG_CONFIG_HOME did nothing
+// for it — while working for the database, so relocating a config tree produced
+// a partial move with no error.
 func DefaultConfigPath() string {
-	if v := os.Getenv("AGENT_MODEL_CONFIG"); v != "" {
-		return v
-	}
+	return herospath.ResolveConfigLegacy("AGENT_MODEL_CONFIG", "agentmodel", "config.yaml",
+		legacyPath("config.yaml"))
+}
+
+// legacyPath is the pre-migration ~/.config/agentmodel/<name> location, where
+// the config file and the database sat side by side before the heros/ layout.
+// Both resolvers pass it as their in-place fallback.
+//
+// The CWD-relative return on a missing home is not a real path so much as a
+// value that cannot accidentally match one: resolveLegacy only uses a legacy
+// path when the file exists, so a wrong guess here degrades to "no legacy
+// fallback", never to reading someone else's file.
+func legacyPath(name string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".config", "agentmodel", "config.yaml")
+		return filepath.Join(".config", "agentmodel", name)
 	}
-	return filepath.Join(home, ".config", "agentmodel", "config.yaml")
+	return filepath.Join(home, ".config", "agentmodel", name)
 }
 
 // DBPath resolves the SQLite path used ONLY when the config omits `db` (a
@@ -479,17 +497,7 @@ func DBPath() string {
 		return v
 	}
 	return herospath.ResolveDataLegacy("", "agentmodel", "agentmodel.db",
-		legacyConfigDBPath(), "agentmodel.db")
-}
-
-// legacyConfigDBPath is the pre-migration on-disk DB location that sat beside
-// the config file (~/.config/agentmodel/agentmodel.db).
-func legacyConfigDBPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".config", "agentmodel", "agentmodel.db")
-	}
-	return filepath.Join(home, ".config", "agentmodel", "agentmodel.db")
+		legacyPath("agentmodel.db"), "agentmodel.db")
 }
 
 // LoadConfig reads, parses, and validates a config file. An empty path falls
@@ -514,6 +522,9 @@ func LoadConfig(path string) (*Config, error) {
 
 // Validate enforces invariants and applies defaults in place.
 func (c *Config) Validate() error {
+	if err := c.Portal.Validate(); err != nil {
+		return err
+	}
 	if c.Listen == "" {
 		c.Listen = ":8080"
 	}
@@ -568,7 +579,7 @@ func (c *Config) Validate() error {
 	}
 
 	// Budget caps and virtual keys: surface a malformed contract at load
-	// time, before #47/#52 start enforcing it. Durations are normalized
+	// time, before request handlers enforce it. Durations are normalized
 	// (trimmed) first so validation, Window(), and /v1/limits reporting all
 	// read the same canonical string.
 	c.Budget.BudgetDuration = strings.TrimSpace(c.Budget.BudgetDuration)
@@ -711,7 +722,7 @@ func validateDeployment(d DeploymentConfig, ctx string) error {
 			return fmt.Errorf("agentmodel/config: %s: oauth_token_dir and oauth_token_dirs are mutually exclusive", ctx)
 		}
 		// oauth_token_dirs is the multi-account pool for every subscription
-		// provider (#58): chatgpt device-code dirs and Anthropic refreshable
+		// provider: chatgpt device-code dirs and Anthropic refreshable
 		// dirs alike. The "provider supports subscription" check below is the
 		// only gate — a provider that cannot do subscription auth at all is
 		// rejected there with a clearer message.

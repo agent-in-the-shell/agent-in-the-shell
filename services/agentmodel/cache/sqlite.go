@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/agent-in-the-shell/agent-in-the-shell/internal/herospath"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -31,6 +33,20 @@ CREATE TABLE IF NOT EXISTS response_cache (
 );`
 
 func newSQLite(path string, ttl time.Duration, clock func() time.Time) (*sqliteCache, error) {
+	// Create the parent 0700 before opening, as store.OpenSQLite does. This
+	// path holds completion bodies; it should not inherit a world-traversable
+	// directory from whatever created it.
+	if _, err := herospath.EnsureParent(path); err != nil {
+		return nil, fmt.Errorf("agentmodel/cache: create data dir: %w", err)
+	}
+	// response_cache.value is the response body verbatim, so this file is as
+	// sensitive as the content log. Before the open, not after: see
+	// SecureSQLiteFile. Failing rather than warning matches the content log —
+	// if the mode cannot be guaranteed there is no safe way to keep writing
+	// completions here.
+	if err := herospath.SecureSQLiteFile(path); err != nil {
+		return nil, fmt.Errorf("agentmodel/cache: secure %q: %w", path, err)
+	}
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

@@ -24,6 +24,7 @@ type keyJSON struct {
 	BudgetDuration string   `json:"budget_duration"`
 	ExpiresAt      *int64   `json:"expires_at"`
 	Disabled       bool     `json:"disabled"`
+	RevokedAt      *int64   `json:"revoked_at,omitempty"`
 	CreatedAt      int64    `json:"created_at"`
 	Spend          *float64 `json:"spend"`
 	Key            string   `json:"key"`
@@ -200,7 +201,7 @@ func TestGetKey_ReportsSpend(t *testing.T) {
 	}
 }
 
-func TestRevokeUnrevoke(t *testing.T) {
+func TestEnableCannotRestoreRevokedKey(t *testing.T) {
 	ts, st := newTestServer(t, gpt4Deps())
 	const tok = "sk-am-toggle"
 	mustCreateKey(t, st, store.ManagedKey{ID: "k-tog", Name: "tog", KeyHash: sha256hex(tok)})
@@ -218,8 +219,8 @@ func TestRevokeUnrevoke(t *testing.T) {
 	if rv.StatusCode != http.StatusOK {
 		t.Fatalf("revoke status: got %d, want 200", rv.StatusCode)
 	}
-	if got := decodeKeyJSON(t, rv); !got.Disabled {
-		t.Error("revoke: disabled not set")
+	if got := decodeKeyJSON(t, rv); got.RevokedAt == nil {
+		t.Error("revoke: timestamp not set")
 	}
 	rv.Body.Close()
 	if resp := mustPost(t, ts, "/v1/chat/completions", chatBody("gpt-4"), tok); resp.StatusCode != http.StatusUnauthorized {
@@ -229,17 +230,28 @@ func TestRevokeUnrevoke(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	// Unrevoke → authenticates again.
-	urv := keyReq(t, ts, "POST", "/v1/keys/k-tog/unrevoke", testToken)
-	urv.Body.Close()
-	if urv.StatusCode != http.StatusOK {
-		t.Fatalf("unrevoke status: got %d, want 200", urv.StatusCode)
+	// Enable cannot restore a permanently retired credential.
+	enable := keyReq(t, ts, "POST", "/v1/keys/k-tog/enable", testToken)
+	enable.Body.Close()
+	if enable.StatusCode != http.StatusConflict {
+		t.Fatalf("enable status: got %d, want 409", enable.StatusCode)
 	}
-	if resp := mustPost(t, ts, "/v1/chat/completions", chatBody("gpt-4"), tok); resp.StatusCode != http.StatusOK {
+	if resp := mustPost(t, ts, "/v1/chat/completions", chatBody("gpt-4"), tok); resp.StatusCode != http.StatusUnauthorized {
 		resp.Body.Close()
-		t.Fatalf("unrevoked auth: got %d, want 200", resp.StatusCode)
+		t.Fatalf("retired auth: got %d, want 401", resp.StatusCode)
 	} else {
 		resp.Body.Close()
+	}
+}
+
+func TestUnrevokeRouteAbsent(t *testing.T) {
+	ts, st := newTestServer(t, gpt4Deps())
+	mustCreateKey(t, st, store.ManagedKey{ID: "k-disabled", Name: "disabled", KeyHash: sha256hex("sk-am-disabled"), Disabled: true})
+
+	resp := keyReq(t, ts, "POST", "/v1/keys/k-disabled/unrevoke", testToken)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("removed route status: got %d, want 404 or 405", resp.StatusCode)
 	}
 }
 
@@ -253,10 +265,10 @@ func TestDeleteKey(t *testing.T) {
 	if del.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete status: got %d, want 204", del.StatusCode)
 	}
-	// Gone from info and from auth.
-	if info := keyReq(t, ts, "GET", "/v1/keys/k-del", testToken); info.StatusCode != http.StatusNotFound {
+	// Retained in info, but not usable for authentication.
+	if info := keyReq(t, ts, "GET", "/v1/keys/k-del", testToken); info.StatusCode != http.StatusOK {
 		info.Body.Close()
-		t.Fatalf("post-delete info: got %d, want 404", info.StatusCode)
+		t.Fatalf("post-delete info: got %d, want 200", info.StatusCode)
 	} else {
 		info.Body.Close()
 	}
@@ -267,10 +279,10 @@ func TestDeleteKey(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	// Deleting again → 404.
-	if again := keyReq(t, ts, "DELETE", "/v1/keys/k-del", testToken); again.StatusCode != http.StatusNotFound {
+	// Repeating revocation is idempotent.
+	if again := keyReq(t, ts, "DELETE", "/v1/keys/k-del", testToken); again.StatusCode != http.StatusNoContent {
 		again.Body.Close()
-		t.Errorf("re-delete: got %d, want 404", again.StatusCode)
+		t.Errorf("re-delete: got %d, want 204", again.StatusCode)
 	} else {
 		again.Body.Close()
 	}
@@ -292,7 +304,8 @@ func TestKeyEndpoints_RequireMaster(t *testing.T) {
 		{"GET", "/v1/keys"},
 		{"GET", "/v1/keys/k-tenant"},
 		{"POST", "/v1/keys/k-tenant/revoke"},
-		{"POST", "/v1/keys/k-tenant/unrevoke"},
+		{"POST", "/v1/keys/k-tenant/disable"},
+		{"POST", "/v1/keys/k-tenant/enable"},
 		{"DELETE", "/v1/keys/k-tenant"},
 	}
 	for _, rc := range reads {

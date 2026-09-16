@@ -370,7 +370,7 @@ func TestComplete_PreservesMaxTokensForNonReasoningModels(t *testing.T) {
 }
 
 // TestComplete_StripsCacheControl locks in the OSS-robustness fix (axis 11):
-// cache_control is an Anthropic-style hint agent-pi hardcodes on its system
+// cache_control is an Anthropic-style hint clients may set on a system
 // message; a strict OpenAI-compatible local server (vLLM/llama.cpp behind
 // base_url) can 400 on the unknown field, so the OpenAI path must strip it —
 // without mutating the caller's messages, which may be replayed to an
@@ -780,7 +780,7 @@ func TestListModels(t *testing.T) {
 // TestStream_SurfacesMidStreamError locks in that an OpenAI-compatible backend
 // (vLLM/Ollama/Azure content-filter) emitting a mid-stream `data: {"error":...}`
 // object is surfaced as an error, not swallowed into a truncated "success"
-// that ends with no finish_reason and no error (#1487).
+// that ends with no finish_reason and no error.
 func TestStream_SurfacesMidStreamError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

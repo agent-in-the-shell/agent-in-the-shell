@@ -40,7 +40,7 @@ type Client struct {
 	baseURL string
 	http    *http.Client
 
-	// Azure OpenAI mode (#892). The zero value is standard OpenAI. When azure is
+	// Azure OpenAI mode. The zero value is standard OpenAI. When azure is
 	// true, resolveURL rewrites each path to Azure's deployment-scoped layout and
 	// appends the required ?api-version query param; everything else (request /
 	// response wire shape, SSE parsing) is identical, so Complete/Stream/Embed
@@ -67,7 +67,7 @@ func NewWithBaseURL(authenticator auth.Authenticator, baseURL string) *Client {
 	}
 }
 
-// NewAzure constructs a Client that targets an Azure OpenAI resource (#892).
+// NewAzure constructs a Client that targets an Azure OpenAI resource.
 // resourceURL is the resource host (https://<resource>.openai.azure.com, any
 // trailing slash is trimmed); apiVersion is the required Azure api-version
 // (e.g. 2024-10-01-preview); deployment is the Azure deployment name that backs
@@ -113,25 +113,11 @@ func (c *Client) Complete(ctx context.Context, req agentmodel.ChatRequest) (agen
 	// Force stream=false; if a caller wants streaming they must use Stream().
 	req = sanitizeChatRequest(req)
 	req.Stream = false
-	body, err := json.Marshal(toWireRequest(req))
-	if err != nil {
-		return agentmodel.ChatResponse{}, fmt.Errorf("openai: marshal request: %w", err)
-	}
-	httpReq, err := c.newRequest(ctx, "POST", "/chat/completions", bytes.NewReader(body))
+	httpResp, err := c.postJSON(ctx, "/chat/completions", toWireRequest(req), "chat-completions")
 	if err != nil {
 		return agentmodel.ChatResponse{}, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpResp, err := c.http.Do(httpReq)
-	if err != nil {
-		return agentmodel.ChatResponse{}, fmt.Errorf("openai: do request: %w", err)
-	}
 	defer httpResp.Body.Close()
-
-	if httpResp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(httpResp.Body)
-		return agentmodel.ChatResponse{}, mapHTTPError(httpResp, respBody)
-	}
 	// Decode into an intermediate type so we can flatten OpenAI's nested
 	// prompt_tokens_details.cached_tokens into Usage.CacheReadInputTokens.
 	var wire openaiChatResponse
@@ -159,6 +145,9 @@ type openaiUsage struct {
 	PromptTokensDetails *struct {
 		CachedTokens int `json:"cached_tokens,omitempty"`
 	} `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails struct {
+		ReasoningTokens *int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
 }
 
 func (w openaiChatResponse) toAgentmodel() agentmodel.ChatResponse {
@@ -166,6 +155,7 @@ func (w openaiChatResponse) toAgentmodel() agentmodel.ChatResponse {
 		PromptTokens:     w.Usage.PromptTokens,
 		CompletionTokens: w.Usage.CompletionTokens,
 		TotalTokens:      w.Usage.TotalTokens,
+		ReasoningTokens:  w.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
 	if w.Usage.PromptTokensDetails != nil {
 		u.CacheReadInputTokens = w.Usage.PromptTokensDetails.CachedTokens
@@ -246,8 +236,8 @@ func sanitizeChatRequest(req agentmodel.ChatRequest) agentmodel.ChatRequest {
 
 // sanitizeMessages returns a copy of messages normalized for the OpenAI wire
 // dialect: tool-call IDs shortened to OpenAI's length limit, and the
-// Anthropic-style per-message cache_control hint removed (agent-pi hardcodes
-// it on its system message; OpenAI itself ignores unknown fields, but a strict
+// Anthropic-style per-message cache_control hint removed (clients may set
+// it on system messages; OpenAI itself ignores unknown fields, but a strict
 // OpenAI-compatible local server behind base_url — vLLM, llama.cpp, some
 // Ollama configs — can reject the whole request over it). The caller's slice
 // is never mutated, so a router failover can still replay the original
@@ -343,14 +333,9 @@ func (c *Client) Stream(ctx context.Context, req agentmodel.ChatRequest) (iter.S
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	httpResp, err := c.http.Do(httpReq)
+	httpResp, err := c.send(ctx, httpReq, "chat-completions-stream")
 	if err != nil {
-		return nil, fmt.Errorf("openai: do stream request: %w", err)
-	}
-	if httpResp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(httpResp.Body)
-		_ = httpResp.Body.Close()
-		return nil, mapHTTPError(httpResp, respBody)
+		return nil, err
 	}
 
 	seq := func(yield func(provider.StreamChunk, error) bool) {
@@ -393,6 +378,7 @@ func (c *Client) Stream(ctx context.Context, req agentmodel.ChatRequest) (iter.S
 					PromptTokens:     sc.Usage.PromptTokens,
 					CompletionTokens: sc.Usage.CompletionTokens,
 					TotalTokens:      sc.Usage.TotalTokens,
+					ReasoningTokens:  sc.Usage.CompletionTokensDetails.ReasoningTokens,
 				}
 				if sc.Usage.PromptTokensDetails != nil {
 					u.CacheReadInputTokens = sc.Usage.PromptTokensDetails.CachedTokens
@@ -416,25 +402,11 @@ func (c *Client) Stream(ctx context.Context, req agentmodel.ChatRequest) (iter.S
 
 // Embed performs an embedding request.
 func (c *Client) Embed(ctx context.Context, req agentmodel.EmbeddingRequest) (agentmodel.EmbeddingResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return agentmodel.EmbeddingResponse{}, fmt.Errorf("openai: marshal embed request: %w", err)
-	}
-	httpReq, err := c.newRequest(ctx, "POST", "/embeddings", bytes.NewReader(body))
+	httpResp, err := c.postJSON(ctx, "/embeddings", req, "embeddings")
 	if err != nil {
 		return agentmodel.EmbeddingResponse{}, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := c.http.Do(httpReq)
-	if err != nil {
-		return agentmodel.EmbeddingResponse{}, fmt.Errorf("openai: do embed request: %w", err)
-	}
 	defer httpResp.Body.Close()
-	if httpResp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(httpResp.Body)
-		return agentmodel.EmbeddingResponse{}, mapHTTPError(httpResp, respBody)
-	}
 	var resp agentmodel.EmbeddingResponse
 	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
 		return agentmodel.EmbeddingResponse{}, fmt.Errorf("openai: decode embed response: %w", err)
@@ -449,15 +421,11 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpResp, err := c.http.Do(httpReq)
+	httpResp, err := c.send(ctx, httpReq, "list-models")
 	if err != nil {
-		return nil, fmt.Errorf("openai: do list-models request: %w", err)
+		return nil, err
 	}
 	defer httpResp.Body.Close()
-	if httpResp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(httpResp.Body)
-		return nil, mapHTTPError(httpResp, respBody)
-	}
 	var resp struct {
 		Data []struct {
 			ID string `json:"id"`
@@ -473,23 +441,19 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// newRequest builds an http.Request for the given path under c.baseURL with
-// auth headers applied.
+// newRequest builds an http.Request for the given path under c.baseURL.
+// Credentials are NOT applied here — send does that, so that a request reaching
+// the wire without them is not expressible (see send).
 func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.resolveURL(path), body)
 	if err != nil {
 		return nil, fmt.Errorf("openai: build request: %w", err)
 	}
-	if c.auth != nil {
-		if err := c.auth.Apply(ctx, req); err != nil {
-			return nil, fmt.Errorf("openai: apply auth: %w", err)
-		}
-	}
 	return req, nil
 }
 
 // resolveURL maps an OpenAI-relative path (e.g. /chat/completions) to the full
-// upstream URL. Standard mode is c.baseURL+path. Azure mode (#892) rewrites to
+// upstream URL. Standard mode is c.baseURL+path. Azure mode rewrites to
 // the deployment-scoped layout and appends the required api-version query:
 //
 //	/chat/completions -> /openai/deployments/<deployment>/chat/completions?api-version=<v>
@@ -513,15 +477,83 @@ func (c *Client) resolveURL(path string) string {
 	return c.baseURL + p + "?api-version=" + url.QueryEscape(c.apiVersion)
 }
 
+// send applies credentials, performs req, and turns any non-200 into a typed
+// error via mapHTTPError. On success the response is returned with its body
+// still open — the caller owns it, which the streaming path depends on.
+//
+// Every HTTP call in this package goes through here, which is the point. The
+// status used to be mapped by each call site remembering to read the body and
+// call mapHTTPError on its own `!= StatusOK` branch — five sites, five chances
+// to forget. Gemini had the identical shape and one of its four sites did
+// forget, leaving a hardcoded retryable error. One chokepoint makes the class unrepresentable
+// rather than merely absent. See mapHTTPError for why the blast radius
+// is wider than this package.
+//
+// Auth lives here rather than in newRequest so that both halves of "a request
+// that is safe to put on the wire" are behind one call. Splitting them meant a
+// caller could hand-build a request and still reach send — which the guard test
+// permits, since it only forbids touching c.http — and an unauthenticated call
+// comes back 401, classifies as a terminal auth failure, and stops the router's
+// fallback walk. req already carries the context, so send takes none.
+//
+// op names the call ("embeddings", "list-models") and is required. It is
+// stamped on both failure paths: a transport error and a mapped status error
+// are equally useless in a log without knowing which endpoint produced them,
+// and the status half is the one you get paged for.
+func (c *Client) send(ctx context.Context, req *http.Request, op string) (*http.Response, error) {
+	if c.auth != nil {
+		if err := c.auth.Apply(ctx, req); err != nil {
+			return nil, fmt.Errorf("openai: %s: apply auth: %w", op, err)
+		}
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("openai: %s: %w", op, err)
+	}
+	if resp.StatusCode == http.StatusOK {
+		return resp, nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return nil, fmt.Errorf("openai: %s: %w", op, mapHTTPError(resp, body))
+}
+
+// postJSON marshals body, builds a POST to path, and sends it. The three JSON
+// endpoints (chat, embeddings, images) differ only in path and payload, so this
+// is where that sameness lives; Stream and ListModels build their own requests
+// because one sets an SSE Accept header and the other has no body.
+func (c *Client) postJSON(ctx context.Context, path string, body any, op string) (*http.Response, error) {
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("openai: %s: marshal request: %w", op, err)
+	}
+	req, err := c.newRequest(ctx, "POST", path, bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.send(ctx, req, op)
+}
+
 // mapHTTPError converts a non-2xx OpenAI response to a typed error. We avoid
 // declaring sentinel Err* values in this package per the plan; callers can
 // match on substrings or status code text in the meantime.
+//
+// Every error carries the upstream status via agentmodel.WithUpstreamStatus, so
+// wire.Wrap classifies by it rather than by substrings of the body interpolated
+// below — see wire/status.go for why that body cannot name its own family.
 //
 // resp also supplies the retry hint a 429 carries (wire.RetryAfterFor gates
 // that to 429s). This matters beyond openai: azure, deepseek, and every
 // openaicompat vendor compose this client, so one hint here covers all of them.
 func mapHTTPError(resp *http.Response, body []byte) error {
-	bodyStr := strings.TrimSpace(string(body))
+	return agentmodel.WithUpstreamStatus(
+		rawHTTPError(resp, strings.TrimSpace(string(body))), resp.StatusCode)
+}
+
+// rawHTTPError builds the message for mapHTTPError. Split out so the status is
+// attached in exactly one place rather than on every return.
+func rawHTTPError(resp *http.Response, bodyStr string) error {
 	status := resp.StatusCode
 	switch status {
 	case http.StatusUnauthorized:

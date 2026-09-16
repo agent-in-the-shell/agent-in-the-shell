@@ -152,7 +152,7 @@ func TestInspectStore_MissingDirIsNotAnError(t *testing.T) {
 // TestInspectStore_GatewayReadable: the request path (readCreds) reads only the
 // flat access_token field, so native + Codex tokens are gateway-readable but the
 // nested Claude-CLI layout (token under anthropic.access) is NOT — status must be
-// able to flag a store the gateway cannot actually consume (#1490/#1487 review).
+// able to flag a store the gateway cannot actually consume.
 func TestInspectStore_GatewayReadable(t *testing.T) {
 	cases := []struct {
 		name, provider, body string
@@ -178,7 +178,7 @@ func TestInspectStore_GatewayReadable(t *testing.T) {
 // TestInspectStore_GatewayReadableMatchesReadCreds pins the coupling: a store is
 // GatewayReadable exactly when the request path's readCreds extracts a token from
 // it. If readCreds ever learns a new on-disk layout, this guard forces
-// GatewayReadable to keep pace instead of silently lying (#1490).
+// GatewayReadable to keep pace instead of silently lying.
 func TestInspectStore_GatewayReadableMatchesReadCreds(t *testing.T) {
 	bodies := []string{
 		`{"schema":"agentmodel.oauth/v1","access_token":"t","expires_at_ms":4102444800000}`, // native

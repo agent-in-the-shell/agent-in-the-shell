@@ -25,7 +25,7 @@ var docRowRE = regexp.MustCompile("^\\|\\s*`(GET|POST|PUT|DELETE|PATCH)`\\s*\\|\
 // honest. It walks the live chi router and asserts the documented set of
 // `/v1` endpoints exactly equals the registered set — so adding or removing a
 // route without updating the doc fails CI, instead of letting the user-facing
-// table silently rot (the recurring drift #922 surfaced). Descriptions stay
+// table silently rot (the recurring drift  surfaced). Descriptions stay
 // human-owned; only presence of each METHOD+path is enforced.
 func TestDocEndpointsMatchRoutes(t *testing.T) {
 	routes := registeredV1Routes(t)

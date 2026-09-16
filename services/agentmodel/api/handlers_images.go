@@ -29,7 +29,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pre-request enforcement (#47/#52). Image generation has no fallback walk,
+	// Pre-request enforcement. Image generation has no fallback walk,
 	// so the entry-model allowlist + budget check alone bounds access.
 	if ae := s.enforce(r.Context(), vkFromCtx(r.Context()), req.Model); ae != nil {
 		s.logImageFailure(r.Context(), req, ae, 0)

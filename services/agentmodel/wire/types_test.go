@@ -2,6 +2,7 @@ package wire_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/wire"
@@ -346,6 +347,43 @@ func TestThinkingBlock_RoundTrip(t *testing.T) {
 	}
 	if got.ThinkingBlocks[0].Signature != "sig123" {
 		t.Errorf("Signature = %q, want sig123", got.ThinkingBlocks[0].Signature)
+	}
+}
+
+func TestStreamChunk_JSONShapeMatchesOpenAI(t *testing.T) {
+	c := wire.StreamChunk{
+		ID:      "cmpl-1",
+		Object:  "chat.completion.chunk",
+		Created: 1700000000,
+		Model:   "m",
+		Choices: []wire.StreamChoice{{
+			Index:        0,
+			Delta:        wire.Message{Role: "assistant", Content: "hi"},
+			FinishReason: "stop",
+		}},
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	for _, want := range []string{
+		`"id":"cmpl-1"`,
+		`"object":"chat.completion.chunk"`,
+		`"created":1700000000`,
+		`"model":"m"`,
+		`"choices"`,
+		`"index":0`,
+		`"delta"`,
+		`"finish_reason":"stop"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("marshalled chunk missing %s: %s", want, got)
+		}
+	}
+	// usage is omitted until the terminal chunk carries it
+	if strings.Contains(got, `"usage"`) {
+		t.Errorf("usage must be omitempty, got %s", got)
 	}
 }
 

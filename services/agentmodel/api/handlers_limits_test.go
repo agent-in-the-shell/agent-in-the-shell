@@ -94,7 +94,7 @@ func TestLimits_ReportsConfiguredCaps(t *testing.T) {
 		if w.WindowStatus != "ok" {
 			t.Errorf("window %s status: got %q, want ok", w.LimitName, w.WindowStatus)
 		}
-		// #46 metering: with no traffic yet, used is 0 and the full cap remains.
+		//  metering: with no traffic yet, used is 0 and the full cap remains.
 		if w.Used == nil || *w.Used != 0 {
 			t.Errorf("window %s used: got %v, want 0", w.LimitName, w.Used)
 		}
@@ -175,7 +175,7 @@ func TestLimits_ReportsBudgetCaps(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if got.Status != "ok" {
-		t.Errorf("status: got %q, want ok (budget windows stay ok until #500 metering)", got.Status)
+		t.Errorf("status: got %q, want ok (budget windows stay ok until live spend metering is implemented)", got.Status)
 	}
 	// 3 budget windows (org + 2 capped keys) + 1 rpm window.
 	if len(got.Windows) != 4 {
@@ -201,7 +201,7 @@ func TestLimits_ReportsBudgetCaps(t *testing.T) {
 		t.Errorf("org window: got %q, want 720h", org.Window)
 	}
 	if org.Used != nil || org.Remaining != nil {
-		t.Errorf("org used/remaining must be null until #500 (got used=%v remaining=%v)", org.Used, org.Remaining)
+		t.Errorf("org used/remaining must be null until live spend metering is implemented (got used=%v remaining=%v)", org.Used, org.Remaining)
 	}
 	if org.WindowStatus != "ok" {
 		t.Errorf("org status: got %q, want ok", org.WindowStatus)

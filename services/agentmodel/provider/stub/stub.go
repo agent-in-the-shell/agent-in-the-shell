@@ -10,7 +10,6 @@ import (
 	"iter"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,7 +36,9 @@ type Stub struct {
 	LiveModels            []string // returned by ListModels (provider.ModelLister)
 	ListModelsErr         error    // if set, ListModels returns this error
 
-	mu               sync.Mutex
+	// All three counters are read and written with sync/atomic, so there is no
+	// mutex here on purpose — adding one would suggest a lock discipline the
+	// accessors do not have.
 	callCount        int32
 	listModelsCount  int32
 	passthroughCount int32

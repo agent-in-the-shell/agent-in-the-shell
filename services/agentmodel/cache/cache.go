@@ -4,7 +4,7 @@
 // It is a generic TTL'd key→bytes store — callers (the api layer) own key
 // derivation and value (un)marshalling, so the same cache can back chat
 // completions today and embeddings/messages later. It mirrors LiteLLM's
-// response-cache concept (#48), but is SQLite-backed rather than Redis to match
+// response-cache concept, but is SQLite-backed rather than Redis to match
 // the stack's zero-external-dependency posture (single static binary).
 package cache
 

@@ -63,7 +63,7 @@ func errBody(t *testing.T, resp *http.Response) (typ, code, message string) {
 	return got.Error.Type, got.Error.Code, got.Error.Message
 }
 
-// ─── Virtual key auth (#52) ────────────────────────────────────────────────
+// ─── Virtual key auth ────────────────────────────────────────────────
 
 func TestVirtualKeyAuth(t *testing.T) {
 	t.Setenv("TEST_VK_CI", "vk-token-ci")
@@ -119,7 +119,7 @@ func TestVirtualKeyAuth_UnsetEnvFailsClosed(t *testing.T) {
 	}
 }
 
-// ─── Model allowlist (#52) ─────────────────────────────────────────────────
+// ─── Model allowlist ─────────────────────────────────────────────────
 
 func TestModelAllowlist(t *testing.T) {
 	t.Setenv("TEST_VK_LTD", "vk-token-ltd")
@@ -159,7 +159,7 @@ func TestModelAllowlist(t *testing.T) {
 
 // The allowlist must bound fallbacks too: a restricted key's request is never
 // served by a fallback target outside its allowlist, while the master token
-// falls back normally (the documented #52 contract).
+// falls back normally (the documented  contract).
 func TestModelAllowlist_BoundsFallbacks(t *testing.T) {
 	t.Setenv("TEST_VK_FB", "vk-token-fb")
 	fallbackOK := &stub.Stub{NameValue: "anthropic"}
@@ -206,7 +206,7 @@ func TestModelAllowlist_BoundsFallbacks(t *testing.T) {
 	})
 }
 
-// ─── Budget enforcement (#47) ──────────────────────────────────────────────
+// ─── Budget enforcement ──────────────────────────────────────────────
 
 func TestOrgBudgetEnforced(t *testing.T) {
 	ts, st := newTestServer(t, map[string][]router.Deployment{
@@ -533,7 +533,7 @@ func TestRejectionWritesAuditRow(t *testing.T) {
 	}
 }
 
-// ─── RPM/TPM pre-call enforcement (#46) ─────────────────────────────────────
+// ─── RPM/TPM pre-call enforcement ─────────────────────────────────────
 
 // sameMinute runs fn up to twice: if the UTC minute rolled while fn ran (the
 // meter window reset between the test's requests), the first attempt is

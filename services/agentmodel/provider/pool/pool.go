@@ -81,8 +81,9 @@ func New(providers []provider.Provider, opts ...Option) *Pool {
 // Compile-time checks: Pool forwards these optional capabilities (see
 // GenerateImage / ListModels below).
 var (
-	_ provider.ImageGenerator = (*Pool)(nil)
-	_ provider.ModelLister    = (*Pool)(nil)
+	_ provider.ImageGenerator               = (*Pool)(nil)
+	_ provider.ModelLister                  = (*Pool)(nil)
+	_ provider.ResponsesPassthroughProvider = (*Pool)(nil)
 )
 
 // Name delegates to the first underlying provider. A Pool wraps N credentials
@@ -91,7 +92,7 @@ var (
 // a literal "pool": the router copies Name() into Usage.Provider and the cost
 // registry is keyed "<provider>/<model>", so a "pool" name would miss the
 // catalog and price every pooled deployment as unpriced ($0), silently bypassing
-// its budget cap (#1486).
+// its budget cap.
 func (p *Pool) Name() string              { return p.providers[0].Name() }
 func (p *Pool) AuthMode() string          { return p.providers[0].AuthMode() }
 func (p *Pool) SupportedModels() []string { return p.providers[0].SupportedModels() }
@@ -203,6 +204,46 @@ func (p *Pool) MessagesPassthrough(ctx context.Context, body []byte, modelOverri
 		// No inner provider implements passthrough: a terminal capability miss,
 		// not a transient rate limit. ErrNotSupported maps to a terminal 4xx so
 		// the router doesn't retry a request that can never succeed.
+		return nil, provider.ErrNotSupported
+	}
+	return nil, p.errAllCooled(modelOverride)
+}
+
+// ResponsesPassthrough cycles raw Responses calls across capable subscription
+// accounts while retaining the pool's sticky selection and cooldown policy.
+func (p *Pool) ResponsesPassthrough(ctx context.Context, body []byte, modelOverride string) (*http.Response, error) {
+	anyCapable := false
+	for _, i := range p.order() {
+		pp, ok := p.providers[i].(provider.ResponsesPassthroughProvider)
+		if !ok {
+			continue
+		}
+		anyCapable = true
+		if p.isCooled(i, modelOverride) {
+			continue
+		}
+		resp, err := pp.ResponsesPassthrough(ctx, body, modelOverride)
+		if err != nil {
+			ae := agentmodel.Wrap(err)
+			if ae.Type == agentmodel.ErrTypeRateLimit {
+				p.cool(i, modelOverride, ae.RetryAfter)
+				continue
+			}
+			return nil, err
+		}
+		if resp == nil {
+			continue
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter := agentmodel.RetryAfterFromHeader(resp.Header, p.now())
+			_ = resp.Body.Close()
+			p.cool(i, modelOverride, retryAfter)
+			continue
+		}
+		p.selected(i)
+		return resp, nil
+	}
+	if !anyCapable {
 		return nil, provider.ErrNotSupported
 	}
 	return nil, p.errAllCooled(modelOverride)

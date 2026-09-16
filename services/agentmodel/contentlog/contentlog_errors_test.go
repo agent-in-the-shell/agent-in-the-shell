@@ -238,37 +238,68 @@ func TestBackupHelpersHandleCompressedAndNonstandardNames(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed timestamp falls back to mtime", func(t *testing.T) {
-		dir := t.TempDir()
-		active := filepath.Join(dir, "content.jsonl")
-		backup := active + ".manual-backup"
-		if err := os.WriteFile(backup, []byte("backup"), 0o600); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-		mtime := time.Date(2020, time.March, 4, 5, 6, 7, 0, time.Local)
-		if err := os.Chtimes(backup, mtime, mtime); err != nil {
-			t.Fatalf("Chtimes: %v", err)
-		}
-		fi, err := os.Stat(backup)
-		if err != nil {
-			t.Fatalf("Stat: %v", err)
-		}
-
+	// This used to assert the opposite — that an unparseable name was adopted as
+	// a backup dated by its mtime. That is exactly the bug in : it made
+	// every prefix-sharing neighbour a deletion candidate. A name we cannot
+	// positively identify as ours is now rejected outright.
+	t.Run("names we did not create are rejected", func(t *testing.T) {
+		// backupTime is pure string work, so no real directory is needed.
+		const active = "/logs/content.jsonl"
 		lg := &Logger{path: active}
-		if got := lg.backupTime(backup, fi); !got.Equal(fi.ModTime()) {
-			t.Errorf("backupTime = %v, want file mtime %v", got, fi.ModTime())
+
+		for _, name := range []string{
+			active + ".manual-backup", // '-' present, but not our "-N" counter
+			active + ".bak",
+			active + ".1",
+			active + ".2.gz",
+			active + ".20200101T000000.000000000",   // no UTC marker
+			active + ".20200101T000000.000000000Z-", // empty counter
+			active + ".not-a-sibling",
+			"/somewhere/else.20200101T000000.000000000Z", // wrong prefix entirely
+		} {
+			if _, ok := lg.backupTime(name); ok {
+				t.Errorf("backupTime(%q) accepted a file we did not create", filepath.Base(name))
+			}
+		}
+	})
+
+	// The shapes rotation actually produces must still parse, or retention would
+	// stop pruning anything and the log would grow without bound.
+	t.Run("names we do create are accepted", func(t *testing.T) {
+		const active = "/logs/content.jsonl"
+		lg := &Logger{path: active}
+		want := time.Date(2020, time.January, 2, 3, 4, 5, 123456789, time.UTC)
+
+		for _, name := range []string{
+			active + ".20200102T030405.123456789Z",
+			active + ".20200102T030405.123456789Z.gz",
+			active + ".20200102T030405.123456789Z-1",
+			active + ".20200102T030405.123456789Z-12.gz",
+		} {
+			got, ok := lg.backupTime(name)
+			if !ok {
+				t.Errorf("backupTime(%q) rejected one of our own rotated files", filepath.Base(name))
+				continue
+			}
+			if !got.Equal(want) {
+				t.Errorf("backupTime(%q) = %v, want %v", filepath.Base(name), got, want)
+			}
 		}
 	})
 }
 
-func TestBadGlobErrorsAndNilDiskUsage(t *testing.T) {
-	lg := &Logger{path: "[", size: 42}
-	if _, err := lg.listBackups(); !errors.Is(err, filepath.ErrBadPattern) {
-		t.Errorf("listBackups error = %v, want filepath.ErrBadPattern", err)
+// This used to pin filepath.ErrBadPattern from a "[" path — the glob-pattern
+// behavior that  removed. Enumeration is os.ReadDir now, so an unreadable
+// directory is the real failure mode, and a path full of glob metacharacters is
+// just a literal path.
+func TestUnreadableDirErrorsAndNilDiskUsage(t *testing.T) {
+	lg := &Logger{path: filepath.Join(t.TempDir(), "no-such-dir", "content.jsonl"), size: 42}
+	if _, err := lg.listBackups(); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("listBackups error = %v, want os.ErrNotExist", err)
 	}
 	disk, err := lg.enforceRetention()
-	if !errors.Is(err, filepath.ErrBadPattern) {
-		t.Errorf("enforceRetention error = %v, want filepath.ErrBadPattern", err)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("enforceRetention error = %v, want os.ErrNotExist", err)
 	}
 	if disk != 42 {
 		t.Errorf("enforceRetention disk = %d, want active size 42", disk)

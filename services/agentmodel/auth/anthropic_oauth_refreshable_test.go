@@ -353,7 +353,7 @@ func TestAnthropicOAuthRefreshable_Token(t *testing.T) {
 	}
 }
 
-// TestAnthropicOAuthRefreshable_RefreshWithoutExpiresInIsTrusted guards #1488:
+// TestAnthropicOAuthRefreshable_RefreshWithoutExpiresInIsTrusted guards :
 // a refresh response that omits expires_in (only RECOMMENDED by RFC 6749) must
 // store 0 ("unknown/trusted"), not now() — otherwise the just-minted token is
 // immediately expired and every subsequent request refreshes again, a

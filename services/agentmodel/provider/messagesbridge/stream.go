@@ -31,6 +31,7 @@ type streamWriter struct {
 	curTool   int    // OpenAI tool index of the open tool block (when openKind=="tool")
 
 	stopReason string
+	wireUsage  agentmodel.Usage // last usage in wire form, so Absorb owns the carry-forward rule
 	usage      anthropicUsage
 }
 
@@ -88,7 +89,8 @@ func (s *streamWriter) handleChunk(chunk provider.StreamChunk) error {
 		s.stopReason = finishToStopReason(chunk.FinishReason)
 	}
 	if chunk.Usage != nil {
-		s.usage = usageToAnthropic(*chunk.Usage)
+		s.wireUsage = s.wireUsage.Absorb(*chunk.Usage)
+		s.usage = usageToAnthropic(s.wireUsage)
 	}
 	return nil
 }
@@ -218,7 +220,7 @@ func (s *streamWriter) finish() error {
 // writeError emits the terminal Anthropic `error` event. The payload carries
 // the classified type and code rather than a blanket api_error, so a caller can
 // tell a blown context window (terminal) from a transient upstream 5xx
-// (retryable) — mirroring what /v1/chat/completions has done since #705. The
+// (retryable) — mirroring what /v1/chat/completions has done since . The
 // gateway's own audit row is derived from these same bytes downstream.
 func (s *streamWriter) writeError(err error) error {
 	// Marshal the typed error rather than rebuilding it field by field: its

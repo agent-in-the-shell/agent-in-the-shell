@@ -45,7 +45,7 @@ func (c *Client) GenerateImage(ctx context.Context, req agentmodel.ImageRequest)
 	}
 
 	path := fmt.Sprintf("/v1beta/models/%s:generateContent", req.Model)
-	httpResp, err := c.doJSON(ctx, path, greq)
+	httpResp, err := c.doJSON(ctx, path, greq, "generate-image")
 	if err != nil {
 		return agentmodel.ImageResponse{}, err
 	}

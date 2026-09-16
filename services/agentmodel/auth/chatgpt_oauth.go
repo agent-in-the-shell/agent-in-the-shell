@@ -33,7 +33,8 @@ const (
 	ChatGPTAPIBase            = "https://chatgpt.com/backend-api/codex"
 	ChatGPTClientID           = "app_EMoamEEZ73f0CkXaXp7hrann"
 	ChatGPTOriginator         = "codex_cli_rs"
-	ChatGPTUserAgent          = "codex_cli_rs/0.0.0 (Unknown 0; unknown) unknown"
+	ChatGPTClientVersion      = "0.144.1"
+	ChatGPTUserAgent          = "codex_cli_rs/" + ChatGPTClientVersion + " (Unknown 0; unknown) unknown"
 	devicePollDefaultInterval = 5 * time.Second
 
 	// forceRefreshCoalesceWindow bounds how often ForceRefresh actually rotates

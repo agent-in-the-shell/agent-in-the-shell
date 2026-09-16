@@ -10,13 +10,33 @@
 #   export REPLICATE_API_TOKEN=r8_...                    # optional (Replicate passthrough)
 #   agent-model chatgpt-login                            # optional (ChatGPT Pro)
 #
-#   agentmodel migrate --config config.yaml
-#   agentmodel serve --config config.yaml
+#   agent-model migrate --config config.yaml
+#   agent-model serve --config config.yaml
 
-listen: ":8080"
+listen: "127.0.0.1:8080"
 db: "agentmodel.db"
 auth:
   bearer_token_env: "AGENT_MODEL_TOKEN"
+
+# Temporary employee portal; disabled by default and independent of /v1 auth.
+# Identity/origin fields are mandatory when enabled; admins are exact verified emails.
+# Each employee's models are configured in /portal/admin/; new keys allow none.
+# New keys have no individual budget or expiry; existing keys cannot be adopted.
+portal:
+  enabled: false
+  # Empty uses embedded HTML. Optional absolute directory, e.g. /var/lib/agent-model/portal.
+  # Reads portal.html / portal_admin.html plus portal_shared.css / portal_shared.js on each
+  # authenticated page GET; no static route.
+  # VM: root-owned directory 0755, HTML files 0644, no credentials; replace files atomically.
+  # Restart once to enable this setting; later HTML replacements need no restart.
+  html_dir: ""
+  origin: "https://portal.example.com"
+  # Base URL the pages show clients (the /v1 host). Empty uses the portal's origin.
+  gateway_origin: "https://agent-model.example.com"
+  issuer: "https://your-team.cloudflareaccess.com"
+  audience: "your-access-application-aud"
+  email_domain: "example.com"
+  admin_emails: ["admin@example.com"]
 
 # How long a deployment is parked after a retryable failure (e.g. a 429)
 # before it is retried. Go duration string. Omit for the 5m default; set "0"
@@ -202,7 +222,7 @@ model_list:
         api_key_env: "GEMINI_API_KEY"
         weight: 100
 
-  # Replicate passthrough (#847). A RAW vendor-protocol surface (NOT the
+  # Replicate passthrough. A RAW vendor-protocol surface (NOT the
   # normalized OpenAI shape): consumers point REPLICATE_BASE_URL at the gateway
   # and send the GATEWAY token; the gateway forwards POST /v1/predictions and
   # POST /v1/models/{owner}/{name}/predictions to api.replicate.com, rewrites the
@@ -246,7 +266,7 @@ fallbacks:
 #   max_budget: 100.0          # USD per window; omit for unlimited
 #   budget_duration: "720h"    # Go duration window; omit for a lifetime cap
 
-# Optional virtual API keys (#52): named bearer tokens, each read from its own
+# Optional virtual API keys: named bearer tokens, each read from its own
 # env var, with an optional per-key spend cap and model allowlist. They
 # authenticate independently of AGENT_MODEL_TOKEN and spend against the org
 # budget above. Keys can also be minted at runtime via POST /v1/keys (see API).

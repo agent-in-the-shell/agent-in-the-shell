@@ -1024,7 +1024,7 @@ func TestValidateDeployments_SkipsNonListers(t *testing.T) {
 	}
 }
 
-// ─── Blocked fallback targets (virtual-key model allowlist, #52) ───────────
+// ─── Blocked fallback targets (virtual-key model allowlist, ) ───────────
 
 // A blocked model must be skipped by the fallback walk: the restricted key's
 // request never reaches it, even though it would have served the request.
@@ -1079,7 +1079,7 @@ func TestStreamBlocked_SkipsBlockedFallback(t *testing.T) {
 }
 
 // The blocked seed must bound the passthrough walk too — this is the /v1/messages
-// half of the allowlist-bounds-fallbacks contract (#52). A regression here is
+// half of the allowlist-bounds-fallbacks contract. A regression here is
 // a silent allowlist bypass on /v1/messages.
 func TestMessagesPassthroughBlocked_SkipsBlockedFallback(t *testing.T) {
 	failing := &stub.Stub{MessagesPassthroughFn: passthroughFn(429, `{}`)}
@@ -1115,7 +1115,7 @@ func TestMessagesPassthroughBlocked_SkipsBlockedFallback(t *testing.T) {
 	}
 }
 
-// ─── RPM/TPM pre-call enforcement (#46) ─────────────────────────────────────
+// ─── RPM/TPM pre-call enforcement ─────────────────────────────────────
 
 // pinnedNow is a mid-minute instant; meterClock pins a router's rate-meter
 // clock there so RPM/TPM tests cannot flake across a real minute boundary.
@@ -1446,7 +1446,7 @@ func TestMessagesPassthrough_UnattributableErrorsReturnZeroDeployment(t *testing
 
 // TestMessagesPassthrough_NoCapableDeploymentIsTerminal: a model whose only
 // deployment is chat-only (no PassthroughProvider) must yield a terminal
-// invalid_request, not a 500 ErrAllFailed the client retries (#1491) — mirroring
+// invalid_request, not a 500 ErrAllFailed the client retries — mirroring
 // GenerateImage's capability-miss handling.
 func TestMessagesPassthrough_NoCapableDeploymentIsTerminal(t *testing.T) {
 	r := newRouter(map[string][]router.Deployment{
@@ -1465,7 +1465,7 @@ func TestMessagesPassthrough_NoCapableDeploymentIsTerminal(t *testing.T) {
 	}
 }
 
-// TestCompleteBlocked_TerminalFailureAttributesDeployment guards #1492: a
+// TestCompleteBlocked_TerminalFailureAttributesDeployment guards : a
 // terminal (non-retryable) failure must return the failing deployment's
 // attribution via StreamMeta, so /v1/chat/completions audit rows carry
 // provider/auth_mode instead of "" (the /v1/messages path already did).

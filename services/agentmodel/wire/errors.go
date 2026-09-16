@@ -117,16 +117,16 @@ const (
 	CodeContentPolicy     = "content_policy_violation"
 	CodeQuotaExceeded     = "insufficient_quota"
 	CodeRequestLogin      = "subscription_login_required"
-	// Enforcement codes (#47/#52): pre-request policy rejections.
+	// Enforcement codes: pre-request policy rejections.
 	CodeBudgetExceeded    = "budget_exceeded"
 	CodeModelAccessDenied = "model_access_denied"
 	CodeBudgetUnavailable = "budget_check_unavailable"
 	CodeMasterRequired    = "master_token_required"
-	// CodeAuthUnavailable (#922): a managed-key lookup could not be completed
+	// CodeAuthUnavailable: a managed-key lookup could not be completed
 	// (store unavailable, or a stored cap is unenforceable). Fail-closed 503 —
 	// distinct from invalid_api_key, which means the token is genuinely wrong.
 	CodeAuthUnavailable = "auth_check_unavailable"
-	// Request-validation codes (#705): gateway-side rejections of a malformed
+	// Request-validation codes: gateway-side rejections of a malformed
 	// request before any upstream call. CodeEmptyArray and
 	// CodeMissingRequiredParam mirror OpenAI's current vocabulary; CodeInvalidJSON
 	// is gateway-minted (OpenAI emits a null code for malformed JSON).
@@ -154,7 +154,9 @@ func NewErrorCode(typ, code, message string) *Error {
 // Wrap converts a provider-specific error into our normalized form, attaching
 // the original error chain via Unwrap().
 //
-// Heuristics inspect the error string for common patterns. Providers may
+// A provider error implementing UpstreamStatusHinter is classified by the HTTP
+// status the upstream actually returned. Everything else falls back to
+// heuristics that inspect the error string for common patterns. Providers may
 // also call NewError directly when they have authoritative status info.
 //
 // A provider error implementing RetryAfterHinter has its hint copied onto
@@ -170,12 +172,80 @@ func Wrap(err error) *Error {
 		return ae
 	}
 
-	out := classify(err)
+	out := classifyAny(err)
 	var hinter RetryAfterHinter
 	if errors.As(err, &hinter) {
 		out.RetryAfter = ClampRetryAfter(hinter.RetryAfterHint())
 	}
 	return out
+}
+
+// classifyAny prefers the upstream's own status code and falls back to the
+// substring heuristics only when there is none — a transport failure, a
+// cancellation, or a provider that has not been taught to report its status.
+func classifyAny(err error) *Error {
+	var hinter UpstreamStatusHinter
+	if errors.As(err, &hinter) {
+		if status := hinter.UpstreamStatus(); usableStatus(status) {
+			return classifyStatus(status, err)
+		}
+	}
+	return classify(err)
+}
+
+// classifyStatus maps an upstream HTTP status onto an Error. The status alone
+// decides the FAMILY — that is the whole point, since the message it came with
+// contains the raw upstream body and any digits in it (a token count, a request
+// id, a duration in ms) collide with the substring needles classify uses. The
+// body is still consulted, but only to disambiguate WITHIN a family, where a
+// wrong guess costs a code rather than a retry decision.
+//
+// Only the two arms that need it lowercase the message: msg carries the whole
+// raw upstream body, so folding it is the dominant cost here and every other
+// arm — including every retryable 5xx, the case this function exists for —
+// would pay it for nothing.
+func classifyStatus(status int, err error) *Error {
+	msg := err.Error()
+
+	switch status {
+	case http.StatusUnauthorized:
+		return &Error{Type: ErrTypeAuthentication, Code: CodeInvalidAPIKey, Message: msg, Wrapped: err}
+	case http.StatusForbidden:
+		return &Error{Type: ErrTypePermissionDenied, Message: msg, Wrapped: err}
+	case http.StatusNotFound:
+		return &Error{Type: ErrTypeNotFound, Code: CodeModelNotFound, Message: msg, Wrapped: err}
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		return &Error{Type: ErrTypeTimeout, Message: msg, Wrapped: err}
+	case http.StatusServiceUnavailable, StatusOverloaded:
+		return &Error{Type: ErrTypeServiceUnavailable, Message: msg, Wrapped: err}
+	case http.StatusTooManyRequests:
+		// Throughput throttling and quota exhaustion share a status but not a
+		// remedy, and only the body separates them.
+		if strings.Contains(strings.ToLower(msg), "quota") {
+			return &Error{Type: ErrTypeRateLimit, Code: CodeQuotaExceeded, Message: msg, Wrapped: err}
+		}
+		return &Error{Type: ErrTypeRateLimit, Code: CodeRateLimitExceeded, Message: msg, Wrapped: err}
+	}
+
+	// Every remaining 4xx. Context-window and content-filter rejections arrive
+	// as a *code* nested inside a generic invalid_request_error body, so the
+	// body is the only thing that distinguishes them from an ordinary bad
+	// request. All three are terminal either way, so a miss here never costs a
+	// fallback.
+	if status >= 400 && status < 500 {
+		lower := strings.ToLower(msg)
+		switch {
+		case isContextWindowBody(lower):
+			return &Error{Type: ErrTypeContextWindow, Code: CodeContextLength, Message: msg, Wrapped: err}
+		case isContentFilterBody(lower):
+			return &Error{Type: ErrTypeContentFilter, Code: CodeContentPolicy, Message: msg, Wrapped: err}
+		}
+		return &Error{Type: ErrTypeInvalidRequest, Message: msg, Wrapped: err}
+	}
+
+	// Every remaining 5xx, and any status outside the ranges above: the upstream
+	// broke in a way another deployment may not. Retryable.
+	return &Error{Type: ErrTypeUpstream, Message: msg, Wrapped: err}
 }
 
 func classify(err error) *Error {
@@ -201,9 +271,9 @@ func classify(err error) *Error {
 	// so they must be tested before the 400 case below — otherwise the generic
 	// case swallows them and ErrTypeContextWindow / ErrTypeContentFilter are
 	// unreachable for those providers.
-	case containsAny(lower, "context_length_exceeded", "context length", "maximum context length", "context window"):
+	case isContextWindowBody(lower):
 		return &Error{Type: ErrTypeContextWindow, Code: CodeContextLength, Message: msg, Wrapped: err}
-	case containsAny(lower, "content_policy_violation", "content_filter", "content policy", "content filter", "responsibleaipolicyviolation"):
+	case isContentFilterBody(lower):
 		return &Error{Type: ErrTypeContentFilter, Code: CodeContentPolicy, Message: msg, Wrapped: err}
 	case containsAny(lower, "400", "bad request", "invalid_request_error", "invalid request"):
 		return &Error{Type: ErrTypeInvalidRequest, Message: msg, Wrapped: err}
@@ -221,6 +291,24 @@ func classify(err error) *Error {
 		// detected by their substrings.
 		return &Error{Type: ErrTypeUpstream, Message: msg, Wrapped: err}
 	}
+}
+
+// isContextWindowBody and isContentFilterBody name the two terminal rejections
+// that OpenAI-shaped backends report as a *code* nested inside a generic
+// invalid_request_error body rather than as a status of their own. classify
+// tests them ahead of its generic 400 arm; classifyStatus tests them inside its
+// 4xx arm. They live here so the needle lists — which are the entire content of
+// both checks — exist once and cannot drift between the two paths.
+//
+// Each list's first needle is the provider's own code constant, so the wire
+// code we emit and the string we match on stay the same value.
+func isContextWindowBody(lower string) bool {
+	return containsAny(lower, CodeContextLength, "context length", "context window")
+}
+
+func isContentFilterBody(lower string) bool {
+	return containsAny(lower, CodeContentPolicy, "content_filter", "content policy",
+		"content filter", "responsibleaipolicyviolation")
 }
 
 func containsAny(s string, subs ...string) bool {

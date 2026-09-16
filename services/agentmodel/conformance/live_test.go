@@ -199,7 +199,7 @@ func TestLive_AnthropicThinking(t *testing.T) {
 				assertThinking(t, "streamed", reasoning.String(), blocks)
 
 				// Streaming used to log reasoning text only, dropping the
-				// signatures (#1520, fixed in #1521).
+				// signatures (, fixed in ).
 				logged := lastLoggedMessage(t, logPath)
 				assertThinking(t, "content log", logged.ReasoningContent, logged.ThinkingBlocks)
 			})

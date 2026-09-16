@@ -180,7 +180,7 @@ func TestDoStatus_BadConfig_Errors(t *testing.T) {
 
 // TestDoStatus_ForeignFormatStore_FlaggedWrongFmt: a store in the nested
 // Claude-CLI/pi format has a token, but the gateway's readCreds cannot read it,
-// so status must flag WRONG-FMT and exit 1 — not a false OK (#1490).
+// so status must flag WRONG-FMT and exit 1 — not a false OK.
 func TestDoStatus_ForeignFormatStore_FlaggedWrongFmt(t *testing.T) {
 	dir := writeTokenStore(t, `{"anthropic":{"access":"tok","expires":4102444800000}}`)
 	body := "" +
@@ -206,7 +206,7 @@ func TestDoStatus_ForeignFormatStore_FlaggedWrongFmt(t *testing.T) {
 
 // TestDoStatus_SkipsWeightZeroDeployment: a weight:0 (disabled) deployment is
 // dropped by the factory and never serves, so status must not report it as a
-// routable row (#1494 weight:0 semantics leaking into status).
+// routable row (weight:0 semantics leaking into status).
 func TestDoStatus_SkipsWeightZeroDeployment(t *testing.T) {
 	fresh := writeTokenStore(t, freshNativeStore)
 	disabled := writeTokenStore(t, freshNativeStore)

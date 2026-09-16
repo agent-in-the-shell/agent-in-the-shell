@@ -19,7 +19,7 @@ import (
 
 // writeImageSSE writes the SSE event sequence a real chatgpt image
 // generation call actually produces, confirmed against the live Codex
-// backend (#1059): the base64 result arrives in a response.output_item.done
+// backend: the base64 result arrives in a response.output_item.done
 // event, and response.completed's own output[] is left EMPTY — only its
 // usage/tools fields are read. An earlier version of this helper (and this
 // package) assumed the image arrived inline in response.completed.output[],
@@ -52,6 +52,45 @@ func writeImageSSE(w http.ResponseWriter, result string, inputTok, outputTok, to
 	_, _ = io.WriteString(w, "data: "+string(body)+"\n\n")
 }
 
+func TestReadImageStream_ReasoningUsage(t *testing.T) {
+	zero, positive := 0, 7
+	for _, tc := range []struct {
+		name   string
+		detail string
+		want   *int
+	}{
+		{name: "absent"},
+		{name: "explicit_zero", detail: `,"output_tokens_details":{"reasoning_tokens":0}`, want: &zero},
+		{name: "positive", detail: `,"output_tokens_details":{"reasoning_tokens":7}`, want: &positive},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The image arrives before the terminal event; completed carries only usage/model.
+			sse := "event: response.output_item.done\ndata: " + `{"type":"response.output_item.done","item":{"type":"image_generation_call","result":"base64-png-bytes"}}` + "\n\n" +
+				"event: response.completed\ndata: " + `{"type":"response.completed","response":{"output":[],"usage":{"input_tokens":20,"output_tokens":10,"total_tokens":30,"input_tokens_details":{"cached_tokens":4}` + tc.detail + `},"tools":[{"model":"gpt-image-2-codex"}]}}` + "\n\n"
+			resp, err := readImageStream(&http.Response{Body: io.NopCloser(strings.NewReader(sse))})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := resp.Usage.ReasoningTokens
+			if tc.want == nil {
+				if got != nil {
+					t.Errorf("ReasoningTokens = %d, want nil", *got)
+				}
+			} else if got == nil {
+				t.Errorf("ReasoningTokens = nil, want %d", *tc.want)
+			} else if *got != *tc.want {
+				t.Errorf("ReasoningTokens = %d, want %d", *got, *tc.want)
+			}
+			if resp.Usage.PromptTokens != 20 || resp.Usage.CompletionTokens != 10 || resp.Usage.TotalTokens != 30 || resp.Usage.CacheReadInputTokens != 4 || resp.Usage.AuthMode != agentmodel.AuthModeSubscription {
+				t.Errorf("Usage counts/auth changed: %+v", resp.Usage)
+			}
+			if resp.Model != "gpt-image-2-codex" || len(resp.Data) != 1 || resp.Data[0].B64JSON != "base64-png-bytes" {
+				t.Errorf("unexpected image response: %+v", resp)
+			}
+		})
+	}
+}
+
 func TestGenerateImage_Success(t *testing.T) {
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +103,7 @@ func TestGenerateImage_Success(t *testing.T) {
 	resp, err := c.GenerateImage(context.Background(), agentmodel.ImageRequest{
 		Model:  "gpt-5.5",
 		Prompt: "a red circle",
-		N:      1, // non-zero so omitempty can't mask a regressed N pass-through (#1059)
+		N:      1, // non-zero so omitempty can't mask a regressed N pass-through
 	})
 	if err != nil {
 		t.Fatalf("GenerateImage: %v", err)
@@ -107,7 +146,7 @@ func TestGenerateImage_Success(t *testing.T) {
 		t.Errorf("sent tool = %v, want type=image_generation background=auto", tool)
 	}
 	if _, hasN := tool["n"]; hasN {
-		t.Errorf("sent tool = %v, must not include \"n\" — the Codex backend rejects tools[0].n with 400 even for n:1 (#1059)", tool)
+		t.Errorf("sent tool = %v, must not include \"n\" — the Codex backend rejects tools[0].n with 400 even for n:1", tool)
 	}
 	input, _ := sent["input"].([]any)
 	if len(input) != 1 {
@@ -129,7 +168,7 @@ func TestGenerateImage_Success(t *testing.T) {
 // pending, and response.completed.output[] also carries no image_generation_call
 // (here, a text-only message item instead). The exact wire shape a real
 // text-only refusal takes hasn't been live-verified (unlike the success path
-// in #1059) — this only asserts the code's fallback-exhausted error path.
+// in ) — this only asserts the code's fallback-exhausted error path.
 func TestGenerateImage_NoImageInOutput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -226,7 +265,7 @@ func TestGenerateImage_LargeImagePayload(t *testing.T) {
 
 // TestGenerateImage_MultipleImages_CompletedOutputFallback exercises the
 // response.completed.output[] parsing path directly, independent of the
-// response.output_item.done path real traffic actually uses (#1059 confirmed
+// response.output_item.done path real traffic actually uses (observations confirmed
 // the live backend leaves output[] empty and rejects tools[0].n outright, so
 // a real request can never produce more than one image — this is NOT a
 // realistic response, just a unit-level check that readImageStream still
@@ -266,7 +305,7 @@ func TestGenerateImage_MultipleImages_CompletedOutputFallback(t *testing.T) {
 }
 
 // TestGenerateImage_MultipleOutputItemDoneEvents exercises the real
-// production event path (response.output_item.done, per #1059) with more
+// production event path (response.output_item.done, per ) with more
 // than one such event before response.completed — verifying the pending
 // accumulator collects every one of them, not just the first. A single
 // current request can't actually trigger this (the backend rejects

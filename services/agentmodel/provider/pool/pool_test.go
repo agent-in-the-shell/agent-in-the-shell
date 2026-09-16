@@ -361,7 +361,7 @@ func TestPool_MessagesPassthrough_AllExhausted(t *testing.T) {
 
 // nonPassthrough implements provider.Provider but NOT provider.PassthroughProvider,
 // so the type assertion in MessagesPassthrough fails and the loop skips it.
-type nonPassthrough struct{ called int32 }
+type nonPassthrough struct{}
 
 func (n *nonPassthrough) Name() string              { return "non-passthrough" }
 func (n *nonPassthrough) AuthMode() string          { return agentmodel.AuthModeAPIKey }
@@ -594,7 +594,7 @@ func TestPool_Metadata(t *testing.T) {
 		t.Errorf("expected subscription auth mode")
 	}
 	// Name must delegate to the underlying provider (not a literal "pool") so
-	// cost pricing stays keyed "<provider>/<model>" — see Pool.Name (#1486).
+	// cost pricing stays keyed "<provider>/<model>" — see Pool.Name.
 	if pl.Name() != "groq" {
 		t.Errorf("expected delegated name 'groq', got %q", pl.Name())
 	}
@@ -620,7 +620,7 @@ func passthroughResp(statusCode int, body string) func(context.Context, []byte, 
 // TestPool_MessagesPassthrough_NoCapableProviderReturnsNotSupported: when NO
 // inner provider implements passthrough, the pool must return the terminal
 // provider.ErrNotSupported, not a retryable "all rate-limited" 429 for a request
-// that can never succeed (#1491).
+// that can never succeed.
 func TestPool_MessagesPassthrough_NoCapableProviderReturnsNotSupported(t *testing.T) {
 	pl := pool.New([]provider.Provider{&nonPassthrough{}, &nonPassthrough{}})
 	_, err := pl.MessagesPassthrough(ctx(), []byte(`{}`), "m", "")

@@ -29,12 +29,12 @@ type Deployment struct {
 	// label, and the replicate dedup all key off it. The factory makes it unique
 	// per (provider, model, auth mode) as "provider/model|authmode" — do NOT drop
 	// the "|authmode" suffix, or two credentials of one provider+model would share
-	// a single cooldown / rate-limit bucket (#1489).
+	// a single cooldown / rate-limit bucket.
 	Name     string
 	Provider provider.Provider // the wired provider (already configured w/ auth)
 	Model    string            // the bare model id this deployment dispatches to
 	Weight   int               // relative weight for weighted selection (>= 0)
-	// Configured rate caps. nil = uncapped. Enforced pre-call (#46): a
+	// Configured rate caps. nil = uncapped. Enforced pre-call: a
 	// deployment at its cap for the current UTC minute is skipped exactly
 	// like a cooled deployment, and an all-capped exhaustion surfaces as
 	// 429. Live consumption is reported via DeploymentLimits / GET /v1/limits.
@@ -67,12 +67,12 @@ type Router struct {
 	coolMu       sync.Mutex           // protects depCooldowns
 	depCooldowns map[string]time.Time // key: "logicalModel:depName"
 	cooldown     time.Duration        // how long a deployment is parked after a retryable failure; <= 0 disables cooling
-	meter        *rateMeter           // per-deployment RPM/TPM counters (#46)
+	meter        *rateMeter           // per-deployment RPM/TPM counters
 	now          func() time.Time     // clock for the rate meter; injectable so tests can pin the minute window
 	obs          Observer             // optional; nil disables routing-event hooks
 
 	// Cross-pass TTL cache of each provider's live model list, shared by
-	// ValidateDeployments and DiscoverModels (#526). A pure read when the
+	// ValidateDeployments and DiscoverModels. A pure read when the
 	// cached entry is fresh; a singleflight-collapsed refresh otherwise, with
 	// last-good-on-failure so a transient upstream blip never flaps drift.
 	valMu      sync.Mutex                // protects modelCache
@@ -119,7 +119,7 @@ func WithCooldown(d time.Duration) Option {
 	return func(r *Router) { r.cooldown = d }
 }
 
-// WithNow injects the clock used by the rate meter (#46). Tests pin it
+// WithNow injects the clock used by the rate meter. Tests pin it
 // mid-minute so RPM/TPM assertions cannot flake across a real minute
 // boundary; production uses the default time.Now.
 func WithNow(now func() time.Time) Option {
@@ -131,7 +131,7 @@ func WithNow(now func() time.Time) Option {
 }
 
 // WithModelCacheTTL sets how long a provider's fetched live model list is
-// reused across validation passes before it is refreshed (#526). It is the
+// reused across validation passes before it is refreshed. It is the
 // freshness window backing both ValidateDeployments and DiscoverModels: within
 // a single pass each provider is always queried at most once, and across passes
 // a cached list younger than the TTL is reused instead of re-querying. A
@@ -201,7 +201,7 @@ func (r *Router) Models() []ConfiguredModel {
 // introspection. CooledUntil is non-nil when the deployment is presently
 // parked in a rate-limit cooldown (its expiry); callers can treat that as
 // "limited right now". UsedRequests/UsedTokens are the rateMeter counters for
-// the current UTC minute — the same numbers pre-call enforcement (#46)
+// the current UTC minute — the same numbers pre-call enforcement
 // checks against RPM/TPM.
 type DeploymentLimit struct {
 	ModelName    string
@@ -485,11 +485,11 @@ func (r *Router) coolDep(logicalModel, depName string, retryAfter time.Duration)
 }
 
 // acquireRateSlot atomically admits or rejects one dispatch against the
-// deployment's RPM/TPM caps for the current minute (#46), counting the
+// deployment's RPM/TPM caps for the current minute, counting the
 // attempt when admitted. Checked in the same place as the cooldown so an
 // over-limit deployment is skipped without an upstream call; callers treat
 // the skip as rate-limited so an all-metered exhaustion surfaces as 429,
-// matching the cooled-deployment semantics (#642).
+// matching the cooled-deployment semantics.
 func (r *Router) acquireRateSlot(logicalModel string, dep Deployment) bool {
 	return r.meter.tryAcquire(depKey(logicalModel, dep.Name), dep.RPM, dep.TPM, r.now())
 }
@@ -573,7 +573,7 @@ func (r *Router) Complete(ctx context.Context, req agentmodel.ChatRequest) (agen
 }
 
 // CompleteBlocked is Complete with the given logical model names removed from
-// the fallback graph. Used by the virtual-key model allowlist (#52): a
+// the fallback graph. Used by the virtual-key model allowlist: a
 // restricted key's request must never be served by a fallback outside its
 // allowlist — fallbacks shrink availability for a restricted key, they never
 // widen access. Blocked models are seeded into the visited set, so the walk
@@ -713,7 +713,7 @@ func (r *Router) completeWithSeen(ctx context.Context, req agentmodel.ChatReques
 // StreamMeta names the deployment that served — or, on a terminal failure,
 // that failed — a request. Despite the name it is not streaming-only:
 // CompleteBlocked returns it too, so a failed non-streaming request can be
-// attributed in the audit log (#1492). A zero value means "no single deployment
+// attributed in the audit log. A zero value means "no single deployment
 // to attribute" (a pre-routing rejection, or exhaustion across several).
 type StreamMeta struct {
 	AuthMode  string // "api_key" or "subscription"
@@ -946,6 +946,97 @@ func (r *Router) messagesPassthroughWithSeen(ctx context.Context, body []byte, m
 		// so a rate-limited fallback still reports 429 (mirrors GenerateImage).
 		return nil, Deployment{}, "", agentmodel.NewErrorf(agentmodel.ErrTypeInvalidRequest,
 			"model %q has no passthrough-capable deployment", modelName)
+	}
+	return nil, Deployment{}, "", ErrAllFailed
+}
+
+// ResponsesPassthroughBlocked routes a raw OpenAI Responses request through a
+// deployment that explicitly supports that protocol. It shares the deployment
+// admission, fallback, cooldown, and observation semantics of Messages.
+func (r *Router) ResponsesPassthroughBlocked(ctx context.Context, body []byte, modelName string, blocked []string) (*http.Response, Deployment, string, error) {
+	return r.responsesPassthroughWithSeen(ctx, body, modelName, seedSeen(blocked))
+}
+
+func (r *Router) responsesPassthroughWithSeen(ctx context.Context, body []byte, modelName string, seen map[string]bool) (*http.Response, Deployment, string, error) {
+	if seen[modelName] {
+		return nil, Deployment{}, "", ErrAllFailed
+	}
+	seen[modelName] = true
+
+	candidates := r.deployments[modelName]
+	hitRateLimit := false
+	capable := false
+	var retry retryTracker
+	if len(candidates) > 0 {
+		for _, dep := range r.weightedShuffle(candidates) {
+			pp, ok := dep.Provider.(provider.ResponsesPassthroughProvider)
+			if !ok {
+				continue
+			}
+			capable = true
+			if cooled, left := r.isCooledDep(modelName, dep.Name); cooled {
+				hitRateLimit = true
+				retry.note(left)
+				continue
+			}
+			if !r.acquireRateSlot(modelName, dep) {
+				hitRateLimit = true
+				continue
+			}
+			resp, err := pp.ResponsesPassthrough(ctx, body, dep.Model)
+			if err != nil {
+				ae := agentmodel.Wrap(err)
+				r.obsResult(modelName, dep.Name, dep.Provider.Name(), false)
+				if ae.Retryable() {
+					r.coolDep(modelName, dep.Name, ae.RetryAfter)
+					retry.note(ae.RetryAfter)
+					r.obsCooldown(modelName, dep.Name, dep.Provider.Name())
+					hitRateLimit = true
+					continue
+				}
+				return nil, dep, modelName, ae
+			}
+			if resp == nil {
+				continue
+			}
+			if resp.StatusCode == http.StatusTooManyRequests {
+				retryAfter := agentmodel.RetryAfterFromHeader(resp.Header, r.now())
+				_ = resp.Body.Close()
+				r.obsResult(modelName, dep.Name, dep.Provider.Name(), false)
+				r.coolDep(modelName, dep.Name, retryAfter)
+				retry.note(retryAfter)
+				r.obsCooldown(modelName, dep.Name, dep.Provider.Name())
+				hitRateLimit = true
+				continue
+			}
+			r.obsResult(modelName, dep.Name, dep.Provider.Name(), true)
+			return resp, dep, modelName, nil
+		}
+	} else if _, hasFallback := r.fallbacks[modelName]; !hasFallback {
+		return nil, Deployment{}, "", ErrNoDeployment
+	}
+
+	for _, fb := range r.fallbacks[modelName] {
+		resp, dep, served, err := r.responsesPassthroughWithSeen(ctx, body, fb, seen)
+		if err == nil {
+			return resp, dep, served, nil
+		}
+		ae := agentmodel.Wrap(err)
+		if ae.Retryable() || errors.Is(ae, ErrAllFailed) || errors.Is(ae, ErrNoDeployment) {
+			if ae.Type == agentmodel.ErrTypeRateLimit {
+				hitRateLimit = true
+				retry.note(ae.RetryAfter)
+			}
+			continue
+		}
+		return nil, dep, served, ae
+	}
+	if hitRateLimit {
+		return nil, Deployment{}, "", errAllRateLimitedAfter(modelName, retry.soonest)
+	}
+	if !capable {
+		return nil, Deployment{}, "", agentmodel.NewErrorf(agentmodel.ErrTypeInvalidRequest,
+			"model %q has no Responses-capable deployment", modelName)
 	}
 	return nil, Deployment{}, "", ErrAllFailed
 }

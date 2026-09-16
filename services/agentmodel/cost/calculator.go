@@ -107,7 +107,7 @@ const (
 // CalculateWithSource is like Calculate but, instead of returning an error for
 // an unknown model, it returns (0, SourceUnpriced). This lets callers record
 // the miss in the audit log (and alert on it) rather than silently logging $0
-// as if it were a real price. See issue #511.
+// as if it were a real price. See issue .
 func CalculateWithSource(model string, usage agentmodel.Usage, registry *Registry) (float64, Source) {
 	c, src, _ := calculate(model, usage, registry)
 	return c, src

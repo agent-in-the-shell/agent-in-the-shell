@@ -25,7 +25,7 @@ func (s *Server) embeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pre-request enforcement (#47/#52). Embed has no fallback walk, so the
+	// Pre-request enforcement. Embed has no fallback walk, so the
 	// entry-model allowlist check alone bounds access.
 	if ae := s.enforce(r.Context(), vkFromCtx(r.Context()), req.Model); ae != nil {
 		s.logEmbedFailure(r.Context(), req, ae, 0)

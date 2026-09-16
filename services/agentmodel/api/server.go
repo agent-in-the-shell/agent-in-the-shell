@@ -1,5 +1,5 @@
 // Package api wires the agentmodel HTTP surface: OpenAI-compatible
-// /v1/chat/completions, /v1/embeddings, /v1/images/generations,
+// /v1/chat/completions, /v1/responses, /v1/embeddings, /v1/images/generations,
 // /v1/videos/generations (+ GET /v1/videos/{id}), /v1/models, the /v1/limits
 // rate-limit snapshot, the /v1/account/anthropic/usage subscription-usage
 // probe, /healthz, /readyz, plus the ChatGPT OAuth helper endpoints under
@@ -7,8 +7,10 @@
 package api
 
 import (
+	"cmp"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel"
+	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/access"
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/auth"
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/cache"
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/contentlog"
@@ -33,11 +36,15 @@ import (
 const maxRequestBodyBytes = 64 << 20
 
 type Server struct {
-	router      *router.Router
-	store       store.Store
-	registry    *cost.Registry
-	bearerToken string
-	orgCap      *spendCap // org-wide budget, resolved once at construction; nil = uncapped
+	portal         agentmodel.PortalConfig
+	portalVerifier assertionVerifier // nil when the portal is disabled or misconfigured
+	portalHost     string            // host of portal.origin, resolved once
+	portalStore    store.PortalStore // nil when the store cannot back the portal
+	router         *router.Router
+	store          store.Store
+	registry       *cost.Registry
+	bearerToken    string
+	orgCap         *spendCap // org-wide budget, resolved once at construction; nil = uncapped
 	// orgCapInvalid marks a configured org budget whose window failed to
 	// parse (unreachable via LoadConfig; possible via direct construction).
 	// Spending requests fail closed while it is set.
@@ -49,34 +56,44 @@ type Server struct {
 	// production defaults. anthropicRefreshers caches one refreshable per profile
 	// so this process is the single owner that ever rotates the (single-use)
 	// refresh token — see anthropic_usage.go.
-	anthropicUsageURL   string
-	anthropicClient     *http.Client
+	anthropicUsageURL string
+	anthropicClient   *http.Client
+	// OpenAI/Codex subscription-usage endpoint (GET /v1/account/openai/usage).
+	// openaiUsageBase is overridable for tests; empty uses auth.ChatGPTAPIBase.
+	// It reuses chatgptAuth above — the credential this process already owns.
+	openaiUsageBase     string
+	openaiClient        *http.Client
 	anthropicMu         sync.Mutex
 	anthropicRefreshers map[string]*auth.AnthropicOAuthRefreshable
 	logger              *slog.Logger
 	telemetry           *telemetry.Telemetry // optional; nil is a no-op
 	contentLog          *contentlog.Logger   // optional; nil disables full request/response body logging
-	cache               cache.Cache          // optional; nil disables response caching (#48)
+	cache               cache.Cache          // optional; nil disables response caching
 }
 
 // Config is what callers pass to New.
 type Config struct {
+	Portal      agentmodel.PortalConfig
 	Router      *router.Router
 	Store       store.Store
 	Registry    *cost.Registry
 	BearerToken string
-	Budget      agentmodel.BudgetConfig // optional; org-wide spend cap, reported on /v1/limits (enforcement: #47)
-	Keys        []agentmodel.KeyConfig  // optional; virtual-key caps, reported on /v1/limits (auth wiring: #52)
+	Budget      agentmodel.BudgetConfig // optional; org-wide spend cap, reported on /v1/limits (enforced)
+	Keys        []agentmodel.KeyConfig  // optional; virtual-key caps, reported on /v1/limits (authenticated)
 	ChatGPTAuth *auth.ChatGPTOAuth      // optional
 	// AnthropicUsageURL/AnthropicClient override the Anthropic subscription-usage
 	// endpoint and HTTP client (GET /v1/account/anthropic/usage). Both optional;
 	// empty/nil use the production endpoint and a 30s client. Intended for tests.
 	AnthropicUsageURL string
 	AnthropicClient   *http.Client
-	Logger            *slog.Logger         // optional; defaults to slog.Default()
-	Telemetry         *telemetry.Telemetry // optional; nil disables metrics/tracing
-	ContentLog        *contentlog.Logger   // optional; nil disables full request/response body logging
-	Cache             cache.Cache          // optional; nil disables response caching (#48)
+	// OpenAIUsageBase overrides the codex backend base URL (GET <base>/usage)
+	// for tests; empty uses auth.ChatGPTAPIBase.
+	OpenAIUsageBase string
+	OpenAIClient    *http.Client
+	Logger          *slog.Logger         // optional; defaults to slog.Default()
+	Telemetry       *telemetry.Telemetry // optional; nil disables metrics/tracing
+	ContentLog      *contentlog.Logger   // optional; nil disables full request/response body logging
+	Cache           cache.Cache          // optional; nil disables response caching
 }
 
 // New constructs a Server from Config. Virtual-key tokens are resolved from
@@ -99,18 +116,35 @@ func New(c Config) *Server {
 	if anthropicClient == nil {
 		anthropicClient = &http.Client{Timeout: 30 * time.Second}
 	}
+	// Validation and the origin parse happen once here; portalHandler treats a
+	// nil verifier as "unavailable" instead of re-validating per request.
+	var verifier assertionVerifier
+	var portalHost string
+	if c.Portal.Enabled && c.Portal.Validate() == nil {
+		verifier, _ = access.NewVerifier(c.Portal.Issuer, c.Portal.Audience, c.Portal.EmailDomain)
+		if origin, err := url.Parse(c.Portal.Origin); err == nil {
+			portalHost = origin.Host
+		}
+	}
+	portalStore, _ := c.Store.(store.PortalStore)
 	return &Server{
-		router:        c.Router,
-		store:         c.Store,
-		registry:      c.Registry,
-		bearerToken:   c.BearerToken,
-		orgCap:        orgCap,
-		orgCapInvalid: !orgCapOK,
-		keys:          resolveKeys(c.Keys, logger),
-		chatgptAuth:   c.ChatGPTAuth,
+		portal:         c.Portal,
+		portalVerifier: verifier,
+		portalHost:     portalHost,
+		portalStore:    portalStore,
+		router:         c.Router,
+		store:          c.Store,
+		registry:       c.Registry,
+		bearerToken:    c.BearerToken,
+		orgCap:         orgCap,
+		orgCapInvalid:  !orgCapOK,
+		keys:           resolveKeys(c.Keys, logger),
+		chatgptAuth:    c.ChatGPTAuth,
 
 		anthropicUsageURL:   c.AnthropicUsageURL,
 		anthropicClient:     anthropicClient,
+		openaiUsageBase:     c.OpenAIUsageBase,
+		openaiClient:        cmp.Or(c.OpenAIClient, anthropicClient),
 		anthropicRefreshers: map[string]*auth.AnthropicOAuthRefreshable{},
 
 		logger:     logger,
@@ -125,18 +159,28 @@ func New(c Config) *Server {
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 
-	// Production hygiene: every request gets a UUID for log correlation,
-	// real-IP extraction handles X-Forwarded-For correctly, and Recoverer
-	// catches handler panics so a single bad request doesn't crash the
-	// process.
+	// Production hygiene: every request gets a UUID for log correlation, and
+	// Recoverer catches handler panics so a single bad request doesn't crash
+	// the process.
+	//
+	// Deliberately no middleware.RealIP: chi deprecated it as spoofable
+	// — it rewrites r.RemoteAddr from X-Forwarded-For / True-Client-IP /
+	// X-Real-IP whether or not a proxy in front of us actually sets them, so any
+	// client can choose the value. Nothing here reads RemoteAddr today, so
+	// carrying it bought nothing and left a trap for the next person to add
+	// IP-based logging, throttling or allowlisting. If the gateway is ever
+	// deployed behind a proxy whose headers we do trust, reintroduce this behind
+	// an explicit opt-in config rather than unconditionally.
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 
 	// Health endpoints — unauthenticated.
 	r.Get("/healthz", s.healthz)
 	r.Get("/livez", s.livez)
 	r.Get("/readyz", s.readyz)
+	if s.portal.Enabled {
+		s.mountPortal(r)
+	}
 
 	// Prometheus scrape endpoint — unauthenticated, opt-in via telemetry config.
 	// Exposes only operational metadata (counts/latency/spend), never content.
@@ -152,44 +196,54 @@ func (s *Server) Handler() http.Handler {
 		// messages, embeddings, images, video, predictions) rather than each
 		// handler re-wrapping r.Body.
 		r.Use(middleware.RequestSize(maxRequestBodyBytes))
-		r.Post("/chat/completions", s.chatCompletions)
-		r.Post("/messages", s.messages)
-		r.Post("/embeddings", s.embeddings)
-		r.Post("/images/generations", s.imageGenerations)
-		r.Post("/videos/generations", s.createVideo)
-		r.Get("/videos/{id}", s.getVideo)
-		r.Get("/videos/{id}/content", s.downloadVideoContent)
-		// Replicate passthrough (#847): a raw vendor-protocol surface alongside
+		// Employee keys: synchronous inference and model discovery only. See
+		// employeeKeysAllowed for the rule and the test that enforces it.
+		employee := r.With(s.employeeKeysAllowed)
+		employee.Post("/chat/completions", s.chatCompletions)
+		employee.Post("/responses", s.responses)
+		employee.Post("/messages", s.messages)
+		employee.Post("/embeddings", s.embeddings)
+		employee.Post("/images/generations", s.imageGenerations)
+		employee.Get("/models", s.listModels)
+		// Everything else is operator authority: async job IDs, organization
+		// usage and shared provider accounts.
+		operator := r.With(s.operatorKeysOnly)
+		operator.Post("/videos/generations", s.createVideo)
+		operator.Get("/videos/{id}", s.getVideo)
+		operator.Get("/videos/{id}/content", s.downloadVideoContent)
+		// Replicate passthrough: a raw vendor-protocol surface alongside
 		// the normalized routes above. Both SDK base-URL conventions (Python
 		// host-without-/v1 appends /v1; JS base includes /v1) land on
 		// /v1/predictions. Kept self-contained so the group can be lifted out
 		// later once the ledger moves off embedded SQLite.
-		r.Post("/predictions", s.createPrediction)
-		r.Get("/predictions/{id}", s.getPrediction)
-		r.Post("/predictions/{id}/cancel", s.cancelPrediction)
-		r.Post("/models/{owner}/{name}/predictions", s.createPrediction)
-		r.Get("/models", s.listModels)
-		r.Get("/limits", s.limits)
-		r.Get("/usage", s.usage)
+		operator.Post("/predictions", s.createPrediction)
+		operator.Get("/predictions/{id}", s.getPrediction)
+		operator.Post("/predictions/{id}/cancel", s.cancelPrediction)
+		operator.Post("/models/{owner}/{name}/predictions", s.createPrediction)
+		operator.Get("/limits", s.limits)
+		operator.Get("/usage", s.usage)
 		// Upstream provider-account subscription usage, read through the gateway
 		// so this process is the sole owner of the OAuth refresh token. Distinct
 		// from /v1/limits (the gateway's OWN caps/cooldowns/budgets).
-		r.Get("/account/anthropic/usage", s.anthropicUsage)
+		operator.Get("/account/anthropic/usage", s.anthropicUsage)
+		operator.Get("/account/openai/usage", s.openaiUsage)
 		// Credential management rebinds the gateway's upstream subscription
 		// tokens — operator authority, never tenant authority. Master token
 		// only: a virtual key completing a device-code flow could otherwise
-		// replace the upstream account (#52).
+		// replace the upstream account.
 		r.Group(func(r chi.Router) {
 			r.Use(s.masterOnly)
 			r.Post("/oauth/chatgpt/start", s.chatgptOAuthStart)
 			r.Post("/oauth/chatgpt/poll", s.chatgptOAuthPoll)
-			// Runtime virtual-key management (#922): minting/revoking tenant
+			// Runtime virtual-key management: minting/revoking tenant
 			// credentials is operator authority, never tenant authority.
 			r.Post("/keys", s.createKey)
 			r.Get("/keys", s.listKeys)
 			r.Get("/keys/{id}", s.getKey)
-			r.Post("/keys/{id}/revoke", s.setKeyRevoked(true))
-			r.Post("/keys/{id}/unrevoke", s.setKeyRevoked(false))
+			r.Post("/keys/{id}/revoke", s.revokeKey)
+			r.Post("/keys/{id}/rotate", s.rotateServiceKey)
+			r.Post("/keys/{id}/disable", s.setKeyDisabled(true))
+			r.Post("/keys/{id}/enable", s.setKeyDisabled(false))
 			r.Delete("/keys/{id}", s.deleteKey)
 		})
 	})

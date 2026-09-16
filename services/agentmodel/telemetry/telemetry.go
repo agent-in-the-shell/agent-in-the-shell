@@ -164,7 +164,7 @@ func (t *Telemetry) RecordRequest(ctx context.Context, rl store.RequestLog) {
 		t.costSource.WithLabelValues(rl.CostSource).Inc()
 	}
 	sec := float64(rl.LatencyMs) / 1000.0
-	// Pre-request policy rejections (budget/allowlist, #47/#52) never reach
+	// Pre-request policy rejections (budget/allowlist) never reach
 	// an upstream, so their 0s rows would drag the latency percentiles of
 	// models that were never actually invoked. Gate on the explicit policy
 	// error types — not on (status, latency==0) — so a genuinely fast

@@ -217,8 +217,8 @@ func TestDeleteKey(t *testing.T) {
 	if err := s.DeleteKey(ctx, "id-del"); err != nil {
 		t.Fatalf("DeleteKey: %v", err)
 	}
-	if _, err := s.GetKeyByHash(ctx, "h-del"); !errors.Is(err, store.ErrNotFound) {
-		t.Errorf("after delete: got %v, want ErrNotFound", err)
+	if k, err := s.GetKeyByHash(ctx, "h-del"); err != nil || k.RevokedAt == nil {
+		t.Fatalf("revocation not retained: %+v %v", k, err)
 	}
 }
 
@@ -226,5 +226,27 @@ func TestDeleteKey_NotFound(t *testing.T) {
 	s := newStore(t)
 	if err := s.DeleteKey(context.Background(), "ghost"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("got %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteRetainsIdentityAndCannotEnable(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	key := sampleKey("retained", "retained-hash")
+	if err := s.CreateKey(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteKey(ctx, key.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetKeyByID(ctx, key.ID)
+	if err != nil {
+		t.Fatalf("revocation lost identity: %v", err)
+	}
+	if got.KeyHash != key.KeyHash {
+		t.Fatal("revocation changed attribution")
+	}
+	if err := s.SetKeyDisabled(ctx, key.ID, false); err == nil {
+		t.Fatal("revoked credential could be enabled")
 	}
 }

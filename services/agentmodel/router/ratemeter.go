@@ -7,7 +7,7 @@ import (
 
 // rateMeter tracks per-deployment request and token consumption over fixed,
 // UTC-minute-aligned windows. It is the in-process counter behind pre-call
-// RPM/TPM enforcement (#46) and the live used/remaining numbers on
+// RPM/TPM enforcement and the live used/remaining numbers on
 // GET /v1/limits. Keys match the cooldown map: "logicalModel:depName".
 //
 // Fixed windows (time.Truncate(time.Minute)) rather than sliding: matches the

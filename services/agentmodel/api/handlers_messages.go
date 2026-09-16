@@ -31,6 +31,9 @@ var hopByHopHeaders = map[string]struct{}{
 // message_delta events. Defined once so the four field names live in one
 // place.
 type anthropicUsageBlock struct {
+	OutputTokensDetails struct {
+		ThinkingTokens *int `json:"thinking_tokens"`
+	} `json:"output_tokens_details"`
 	InputTokens              int `json:"input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
@@ -68,7 +71,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pre-request enforcement (#47/#52); mirrors chatCompletions but with the
+	// Pre-request enforcement; mirrors chatCompletions but with the
 	// Anthropic error envelope. Latency 0 for policy rejections, matching
 	// chat/embeddings — the elapsed time so far is body-read, not enforcement.
 	vk := vkFromCtx(r.Context())
@@ -342,6 +345,7 @@ func updateUsageFromEvent(name, raw string, dst *anthropicUsageBlock) {
 			} `json:"message"`
 		}
 		if err := json.Unmarshal([]byte(raw), &ev); err == nil {
+			dst.OutputTokensDetails = ev.Message.Usage.OutputTokensDetails
 			dst.InputTokens = ev.Message.Usage.InputTokens
 			dst.CacheReadInputTokens = ev.Message.Usage.CacheReadInputTokens
 			dst.CacheCreationInputTokens = ev.Message.Usage.CacheCreationInputTokens
@@ -351,6 +355,9 @@ func updateUsageFromEvent(name, raw string, dst *anthropicUsageBlock) {
 			Usage anthropicUsageBlock `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(raw), &ev); err == nil {
+			if ev.Usage.OutputTokensDetails.ThinkingTokens != nil {
+				dst.OutputTokensDetails = ev.Usage.OutputTokensDetails
+			}
 			if ev.Usage.OutputTokens > 0 {
 				dst.OutputTokens = ev.Usage.OutputTokens
 			}
@@ -376,6 +383,7 @@ func usageBlockToAgentmodel(u anthropicUsageBlock) agentmodel.Usage {
 	return agentmodel.Usage{
 		PromptTokens:             prompt,
 		CompletionTokens:         u.OutputTokens,
+		ReasoningTokens:          u.OutputTokensDetails.ThinkingTokens,
 		TotalTokens:              prompt + u.OutputTokens,
 		CacheReadInputTokens:     u.CacheReadInputTokens,
 		CacheCreationInputTokens: u.CacheCreationInputTokens,

@@ -152,6 +152,13 @@ func (e *statusError) Error() string {
 // to size their cooldowns.
 func (e *statusError) RetryAfterHint() time.Duration { return e.retryAfter }
 
+// UpstreamStatus implements wire.UpstreamStatusHinter so agentmodel.Wrap
+// classifies by the status we already hold rather than by substrings of the
+// body Error() interpolates; see wire/status.go for why that body cannot name
+// its own family. It also makes Anthropic's 529 recognizable as overload
+// without depending on the word "overloaded" appearing in the body.
+func (e *statusError) UpstreamStatus() int { return e.code }
+
 // forceRefresher is the optional capability an Authenticator advertises when it
 // can re-mint its access token on demand. *auth.AnthropicOAuthRefreshable
 // implements it; a static api-key or static OAuth token does not (and so never
@@ -443,7 +450,12 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("anthropic: list-models HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// The status rides along rather than being re-derived from this message,
+		// same as every statusError path. This one cannot use statusError itself
+		// without changing the "list-models HTTP" wording callers key on.
+		return nil, agentmodel.WithUpstreamStatus(
+			fmt.Errorf("anthropic: list-models HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+			resp.StatusCode)
 	}
 	var out struct {
 		Data []struct {
@@ -559,6 +571,9 @@ type anthropicUsage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	OutputTokensDetails      struct {
+		ThinkingTokens *int `json:"thinking_tokens"`
+	} `json:"output_tokens_details"`
 }
 
 // ---------------------------------------------------------------------------
@@ -568,36 +583,34 @@ type anthropicUsage struct {
 func toAnthropicReq(req agentmodel.ChatRequest, stream bool, authMode, cacheTTL string) anthropicReq {
 	system, msgs := splitSystem(req.Messages)
 
-	// OAuth subscription: prepend Claude Code identity block so Anthropic
-	// recognises the request as coming from a Claude Code client. Add
-	// cache_control to the last user-provided system block so Anthropic caches
-	// the (often large) system prompt across turns at ~10% of normal input cost.
-	if authMode == agentmodel.AuthModeSubscription {
-		// Anthropic allows at most maxCacheBreakpoints cache_control markers per
-		// request. Only inject our system breakpoint when the client hasn't
-		// already used them all, otherwise the extra marker 400s the request.
-		canCache := countClientCacheBreakpoints(req.Messages) < maxCacheBreakpoints
-		switch s := system.(type) {
-		case nil:
-			system = claudeCodeIdentityPrompt
-		case string:
-			userBlock := anthropicContent{Type: "text", Text: s}
-			if canCache {
-				userBlock.CacheControl = ephemeralCacheControl(cacheTTL)
-			}
-			system = []anthropicContent{
-				{Type: "text", Text: claudeCodeIdentityPrompt},
-				userBlock,
-			}
-		case []anthropicContent:
-			blocks := make([]anthropicContent, len(s))
-			copy(blocks, s)
-			if canCache && len(blocks) > 0 && blocks[len(blocks)-1].CacheControl == nil {
-				blocks[len(blocks)-1].CacheControl = ephemeralCacheControl(cacheTTL)
-			}
-			system = append([]anthropicContent{{Type: "text", Text: claudeCodeIdentityPrompt}}, blocks...)
-		}
-	}
+	// Two independent decisions about the system prompt. They used to share one
+	// `if subscription`, so they could only ever move together:
+	//
+	//   - The Claude Code identity block is prepended for subscription (OAuth)
+	//     tokens only. Anthropic uses it to recognise a Claude Code client. It
+	//     has nothing to do with caching, and an api_key request must not carry
+	//     it.
+	//
+	//   - The prompt-cache breakpoint is placed when the client has said this
+	//     prefix recurs. On /v1/chat/completions the client's only vocabulary
+	//     for that is prompt_cache_key — OpenAI's own field, meaning "requests
+	//     carrying this key share a prefix" — so its presence is the signal.
+	//     A cache write costs 1.25x normal input, so marking a prefix nobody
+	//     sends again is a 25% loss on that request; absence of the key
+	//     therefore means no breakpoint rather than "cache anyway".
+	//
+	// With no key we keep the historical behaviour — on for subscription, off
+	// for api_key — so a client that has never heard of prompt_cache_key sees no
+	// change in either direction.
+	//
+	// The second clause also holds Anthropic's cap: at most maxCacheBreakpoints
+	// markers per request, so we add ours only when the client hasn't already
+	// spent them all — a fifth marker 400s. && short-circuits, so the scan runs
+	// only when we would otherwise be about to cache.
+	injectIdentity := authMode == agentmodel.AuthModeSubscription
+	cacheSystem := (req.PromptCacheKey != "" || authMode == agentmodel.AuthModeSubscription) &&
+		countClientCacheBreakpoints(req.Messages) < maxCacheBreakpoints
+	system = buildSystem(system, injectIdentity, cacheSystem, cacheTTL)
 
 	maxTok := defaultMaxTokens
 	if req.MaxTokens != nil && *req.MaxTokens > 0 {
@@ -664,6 +677,56 @@ func ephemeralCacheControl(ttl string) map[string]string {
 	return cc
 }
 
+// buildSystem applies toAnthropicReq's two system-prompt decisions — prepend
+// the Claude Code identity block, mark the client's system prompt as a
+// prompt-cache breakpoint — either of which may be requested without the other,
+// or neither, in which case system is returned untouched.
+//
+// A cached system always comes back in block form, because cache_control is a
+// per-block field: a string system has to be promoted to a one-element array
+// before it can carry the marker at all.
+func buildSystem(system any, injectIdentity, cacheSystem bool, cacheTTL string) any {
+	if !injectIdentity && !cacheSystem {
+		return system
+	}
+	identity := anthropicContent{Type: "text", Text: claudeCodeIdentityPrompt}
+	switch s := system.(type) {
+	case nil:
+		// The client sent no system prompt, so there is nothing of theirs to
+		// cache. The identity block is ours and is byte-identical on every
+		// request, but marking it would be a wasted breakpoint: it is one short
+		// sentence, well under Anthropic's minimum cacheable prefix, so the
+		// marker caches nothing while still consuming one of the four slots.
+		if injectIdentity {
+			return claudeCodeIdentityPrompt
+		}
+		return nil
+	case string:
+		block := anthropicContent{Type: "text", Text: s}
+		if cacheSystem {
+			block.CacheControl = ephemeralCacheControl(cacheTTL)
+		}
+		if injectIdentity {
+			return []anthropicContent{identity, block}
+		}
+		return []anthropicContent{block}
+	case []anthropicContent:
+		blocks := make([]anthropicContent, len(s))
+		copy(blocks, s)
+		// Never overwrite a marker the client placed itself: they chose that
+		// block, and replacing it would move their breakpoint without changing
+		// the count, which is worse than leaving it alone.
+		if cacheSystem && len(blocks) > 0 && blocks[len(blocks)-1].CacheControl == nil {
+			blocks[len(blocks)-1].CacheControl = ephemeralCacheControl(cacheTTL)
+		}
+		if injectIdentity {
+			return append([]anthropicContent{identity}, blocks...)
+		}
+		return blocks
+	}
+	return system
+}
+
 // countClientCacheBreakpoints counts the cache_control markers a client already
 // placed on its OpenAI-shaped messages. Each message carries at most one (it
 // rides the message's last content block — see toAnthropicMessage), so the
@@ -726,7 +789,7 @@ func countKeyIn(v any, key string) int {
 // object format. Anthropic's valid enum is auto|any|tool|none, so OpenAI's
 // "required" maps to {"type":"any"} (NOT the invalid {"type":"required"}), and
 // OpenAI's named-function form {"type":"function","function":{"name":N}} maps to
-// {"type":"tool","name":N}. Both untranslated shapes 400 on Anthropic (#664).
+// {"type":"tool","name":N}. Both untranslated shapes 400 on Anthropic.
 func normalizeToolChoice(tc any) any {
 	switch v := tc.(type) {
 	case string:
@@ -900,6 +963,7 @@ func fromAnthropicResp(r anthropicResp) (agentmodel.ChatResponse, error) {
 		Usage: agentmodel.Usage{
 			PromptTokens:             prompt,
 			CompletionTokens:         r.Usage.OutputTokens,
+			ReasoningTokens:          r.Usage.OutputTokensDetails.ThinkingTokens,
 			TotalTokens:              prompt + r.Usage.OutputTokens,
 			CacheCreationInputTokens: r.Usage.CacheCreationInputTokens,
 			CacheReadInputTokens:     r.Usage.CacheReadInputTokens,
@@ -909,7 +973,7 @@ func fromAnthropicResp(r anthropicResp) (agentmodel.ChatResponse, error) {
 
 // mapStopReason maps Anthropic stop_reason values onto OpenAI's closed
 // finish_reason enum (stop|length|tool_calls|content_filter). The default
-// clamps to "stop" rather than leaking the raw Anthropic value (#664): a strict
+// clamps to "stop" rather than leaking the raw Anthropic value: a strict
 // OpenAI client rejects an unknown finish_reason, and downstream code defends
 // against leaked values like "end_turn" (services/agentpi/core/loop.go).
 func mapStopReason(s string) string {
@@ -948,16 +1012,13 @@ func streamSSE(body io.Reader, authMode string, yield func(provider.StreamChunk,
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var (
-		eventName        string
-		dataBuf          strings.Builder
-		inputTokens      int
-		outputTokens     int
-		cacheReadTokens  int
-		cacheWriteTokens int
-		finishReason     string
-		toolBlocks       = map[int]*toolBlockState{}
-		thinkingBlocks   = map[int]*thinkingBlockState{}
-		thinkingAccum    []agentmodel.ThinkingBlock
+		eventName      string
+		dataBuf        strings.Builder
+		usage          sseUsage
+		finishReason   string
+		toolBlocks     = map[int]*toolBlockState{}
+		thinkingBlocks = map[int]*thinkingBlockState{}
+		thinkingAccum  []agentmodel.ThinkingBlock
 		// toolSeq is the next OpenAI-side tool_calls[] index to assign. Anthropic
 		// numbers ALL content blocks (text/thinking/tool_use share one index
 		// space), but OpenAI's tool_calls[].index counts only tool calls, so we
@@ -976,8 +1037,7 @@ func streamSSE(body io.Reader, authMode string, yield func(provider.StreamChunk,
 		if raw == "" || raw == "[DONE]" {
 			return true
 		}
-		return handleSSE(name, raw, &inputTokens, &outputTokens, &cacheReadTokens, &cacheWriteTokens,
-			&finishReason, toolBlocks, &toolSeq, thinkingBlocks, &thinkingAccum, yield)
+		return handleSSE(name, raw, &usage, &finishReason, toolBlocks, &toolSeq, thinkingBlocks, &thinkingAccum, yield)
 	}
 
 	for scanner.Scan() {
@@ -1017,13 +1077,14 @@ func streamSSE(body io.Reader, authMode string, yield func(provider.StreamChunk,
 		}
 	}
 
-	prompt := inputTokens + cacheReadTokens + cacheWriteTokens
+	prompt := usage.input + usage.cacheRead + usage.cacheWrite
 	finalUsage := &agentmodel.Usage{
 		PromptTokens:             prompt,
-		CompletionTokens:         outputTokens,
-		TotalTokens:              prompt + outputTokens,
-		CacheReadInputTokens:     cacheReadTokens,
-		CacheCreationInputTokens: cacheWriteTokens,
+		CompletionTokens:         usage.output,
+		ReasoningTokens:          usage.reasoning,
+		TotalTokens:              prompt + usage.output,
+		CacheReadInputTokens:     usage.cacheRead,
+		CacheCreationInputTokens: usage.cacheWrite,
 		AuthMode:                 authMode,
 	}
 	yield(provider.StreamChunk{FinishReason: finishReason, Usage: finalUsage}, nil)
@@ -1041,11 +1102,19 @@ type thinkingBlockState struct {
 	redacted  bool
 }
 
+// sseUsage accumulates the usage counters a stream reports across its events:
+// message_start carries the input side, message_delta the output side, and
+// either may carry the reasoning detail. One struct instead of five pointers.
+type sseUsage struct {
+	input, output, cacheRead, cacheWrite int
+	reasoning                            *int // nil until a frame reports it
+}
+
 // handleSSE dispatches a single SSE event by name. Returns false if the
 // downstream consumer cancelled iteration (yield returned false).
 func handleSSE(
 	name, raw string,
-	inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens *int,
+	usage *sseUsage,
 	finishReason *string,
 	toolBlocks map[int]*toolBlockState,
 	toolSeq *int,
@@ -1064,9 +1133,10 @@ func handleSSE(
 		if err := json.Unmarshal([]byte(raw), &ev); err != nil {
 			return yield(provider.StreamChunk{}, fmt.Errorf("anthropic: parse message_start: %w", err))
 		}
-		*inputTokens = ev.Message.Usage.InputTokens
-		*cacheReadTokens = ev.Message.Usage.CacheReadInputTokens
-		*cacheWriteTokens = ev.Message.Usage.CacheCreationInputTokens
+		usage.reasoning = ev.Message.Usage.OutputTokensDetails.ThinkingTokens
+		usage.input = ev.Message.Usage.InputTokens
+		usage.cacheRead = ev.Message.Usage.CacheReadInputTokens
+		usage.cacheWrite = ev.Message.Usage.CacheCreationInputTokens
 		role := ev.Message.Role
 		if role == "" {
 			role = "assistant"
@@ -1194,17 +1264,20 @@ func handleSSE(
 		if err := json.Unmarshal([]byte(raw), &ev); err != nil {
 			return yield(provider.StreamChunk{}, fmt.Errorf("anthropic: parse message_delta: %w", err))
 		}
+		if ev.Usage.OutputTokensDetails.ThinkingTokens != nil {
+			usage.reasoning = ev.Usage.OutputTokensDetails.ThinkingTokens
+		}
 		if ev.Usage.OutputTokens > 0 {
-			*outputTokens = ev.Usage.OutputTokens
+			usage.output = ev.Usage.OutputTokens
 		}
 		if ev.Usage.InputTokens > 0 {
-			*inputTokens = ev.Usage.InputTokens
+			usage.input = ev.Usage.InputTokens
 		}
 		if ev.Usage.CacheReadInputTokens > 0 {
-			*cacheReadTokens = ev.Usage.CacheReadInputTokens
+			usage.cacheRead = ev.Usage.CacheReadInputTokens
 		}
 		if ev.Usage.CacheCreationInputTokens > 0 {
-			*cacheWriteTokens = ev.Usage.CacheCreationInputTokens
+			usage.cacheWrite = ev.Usage.CacheCreationInputTokens
 		}
 		if ev.Delta.StopReason != "" {
 			*finishReason = mapStopReason(ev.Delta.StopReason)

@@ -1,0 +1,36 @@
+# Review automated updates to pinned actions, image digests and Go modules here.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # The distroless base in Dockerfile.distroless, pinned by index digest.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+
+  # Go module dependencies. Security fixes already arrive via Dependabot
+  # security updates, which are enabled on the repo and fire regardless of this
+  # file; this entry is the routine half, so a dependency does not sit years
+  # behind until a CVE forces a jump across breaking changes. Grouped into one
+  # PR per run because CI runs the whole suite anyway — reviewing one green PR
+  # beats reviewing six.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      go:
+        patterns: ["*"]

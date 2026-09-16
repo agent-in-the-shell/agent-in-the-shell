@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agent-in-the-shell/agent-in-the-shell/internal/wirecontract"
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel"
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/api"
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/auth"
@@ -41,18 +39,32 @@ Usage:
                                        run Anthropic Claude Code PKCE OAuth login
   agent-model profile <set|list|show|remove|migrate>
                                        manage Anthropic OAuth profiles
-  agent-model filter [--url=...] [--model=...] "<system-prompt>"
-                                       read JSONL from stdin, rewrite text field, emit JSONL
+  agent-model prompt [--model <name>] [--timeout <dur>] ["<prompt>"]
+                                       debug: send one prompt through the gateway and print the
+                                       reply; proves the model is online (exit 1 if not)
   agent-model usage [--config <path> | --db <path>] [--since 7d] [--by model] [--org default] [--json]
                                        report request_logs usage: requests, tokens, cost, error_rate
+  agent-model limits [claude|codex] [--profile <name> | --profiles all] [--json] [--watch <dur>]
+                                       subscription quota for the accounts this process holds
+                                       credentials for; non-consuming, no server required;
+                                       --watch redraws every interval (300 or 5m)
   agent-model status [--config <path>] [--json]
                                        offline health snapshot: gateway liveness, token-store
                                        freshness, and model routing; exit 1 if anything is unusable
-  agent-model schema                    print the filter JSONL wire contract and exit
+  agent-model configure-models [--config <path>] [--timeout <dur>]
+                                       discover upstream models and interactively add them to YAML
+  agent-model configure-fallbacks [--config <path>]
+                                       interactively set ordered model fallbacks in YAML
+  agent-model keys <create|list|show|disable|enable|revoke|delete|rotate>
+                                       manage runtime virtual API keys through the running gateway
 
 Environment:
-  AGENT_MODEL_TOKEN          bearer token for /v1/* endpoints (required for serve)
-  AGENT_MODEL_CONFIG        default config path when --config is omitted (default: ~/.config/agentmodel/config.yaml)
+  AGENT_MODEL_TOKEN          bearer token for /v1/* endpoints (required for serve);
+                            master token used by the keys command
+  AGENT_MODEL_BASE_URL       gateway URL for the keys command (default http://127.0.0.1:8080)
+  AGENT_MODEL_CONFIG        default config path when --config is omitted
+                            (default: ${XDG_CONFIG_HOME:-~/.config}/heros/agentmodel/config.yaml;
+                             an existing ~/.config/agentmodel/config.yaml is used in place)
   OPENAI_API_KEY            OpenAI API key
   ANTHROPIC_API_KEY         Anthropic API key
   ANTHROPIC_OAUTH_TOKEN     Claude Pro/Max OAuth token (sk-ant-oat*)
@@ -62,23 +74,6 @@ Environment:
   DEEPSEEK_API_KEY          DeepSeek API key
   CHATGPT_TOKEN_DIR         dir for ChatGPT auth.json (default: ~/.config/agentmodel/chatgpt)
 `
-
-// pipeRecord is the minimal contract `agent-model filter` reads and writes: a
-// JSONL record carrying a `text` field (all other fields pass through). It backs
-// the `schema` self-description.
-type pipeRecord struct {
-	Text string `json:"text"`
-}
-
-// emitSchema writes the `agent-model schema` self-description. `filter` is a
-// passthrough transform: it requires `text`, rewrites it, and preserves every
-// other field of each record. Both sides are therefore open records (the same
-// shape in and out), declared with additionalProperties so a consumer/compiler
-// knows upstream fields survive the stage instead of assuming only `text`.
-func emitSchema(w io.Writer) error {
-	rec := wirecontract.Open(wirecontract.Reflect(pipeRecord{}))
-	return wirecontract.EmitDocument(w, wirecontract.Document{InputSchema: rec, OutputSchema: rec})
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -126,9 +121,15 @@ func main() {
 			osExit(1)
 			return
 		}
-	case "filter":
-		if err := doFilter(os.Args[2:], os.Stdin, os.Stdout); err != nil {
-			logger.Error("filter failed", "err", err)
+	case "prompt":
+		if err := doPrompt(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			logger.Error("prompt failed", "err", err)
+			osExit(1)
+			return
+		}
+	case "limits":
+		if err := doLimits(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			logger.Error("limits failed", "err", err)
 			osExit(1)
 			return
 		}
@@ -147,10 +148,21 @@ func main() {
 			osExit(1)
 			return
 		}
-	case "schema":
-		// `agent-model schema` self-describes the `filter` JSONL contract.
-		if err := emitSchema(os.Stdout); err != nil {
-			logger.Error("schema failed", "err", err)
+	case "configure-models":
+		if err := doConfigureModels(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, logger); err != nil {
+			logger.Error("configure-models failed", "err", err)
+			osExit(1)
+			return
+		}
+	case "configure-fallbacks":
+		if err := doConfigureFallbacks(os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+			logger.Error("configure-fallbacks failed", "err", err)
+			osExit(1)
+			return
+		}
+	case "keys":
+		if err := doKeys(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			logger.Error("keys failed", "err", err)
 			osExit(1)
 			return
 		}
@@ -241,7 +253,7 @@ func runServeContext(ctx context.Context, logger *slog.Logger) error {
 
 	// Opt-in full request/response content log (off unless content_log.path is
 	// set). Records raw prompts and completions — see contentlog package docs.
-	// Rotation/compression/retention (#1399) are wired from config here; the
+	// Rotation/compression/retention are wired from config here; the
 	// callbacks feed rotation success/failure and disk footprint into telemetry.
 	contentLog, err := openContentLog(cfg, logger, tel)
 	if err != nil {
@@ -252,7 +264,7 @@ func runServeContext(ctx context.Context, logger *slog.Logger) error {
 		logger.Info("content logging enabled", "path", cfg.ContentLog.Path)
 	}
 
-	// Response cache (#48): opt-in, off by default. In-memory LRU L1 with an
+	// Response cache: opt-in, off by default. In-memory LRU L1 with an
 	// optional persistent SQLite L2. Closed on shutdown so the L2 file is flushed.
 	var respCache cache.Cache
 	if cfg.Cache.Enabled {
@@ -280,6 +292,7 @@ func runServeContext(ctx context.Context, logger *slog.Logger) error {
 		BearerToken: bearerToken,
 		Budget:      cfg.Budget,
 		Keys:        cfg.Keys,
+		Portal:      cfg.Portal,
 		ChatGPTAuth: chatgptOAuth,
 		Logger:      logger,
 		Telemetry:   tel,
@@ -294,7 +307,7 @@ func runServeContext(ctx context.Context, logger *slog.Logger) error {
 	startRetentionPurge(serveCtx, logger, st, cfg.Retention)
 
 	// Background content-log disk-usage sampler: refreshes the footprint gauge
-	// between rotations so a Prometheus alert can catch abnormal growth (#1399).
+	// between rotations so a Prometheus alert can catch abnormal growth.
 	// A no-op when content logging or metrics are off.
 	startContentLogSampler(serveCtx, tel, contentLog, contentLogSampleInterval)
 
@@ -339,7 +352,7 @@ func runServeContext(ctx context.Context, logger *slog.Logger) error {
 const contentLogSampleInterval = time.Minute
 
 // openContentLog opens the opt-in content log with rotation, compression, and
-// retention derived from config (#1399). Sizes are configured in megabytes and
+// retention derived from config. Sizes are configured in megabytes and
 // converted to bytes here; durations were validated at load time. The rotation
 // callbacks feed success/failure and the post-rotation disk footprint into
 // telemetry and the structured log, which is the alerting substrate. A nil tel

@@ -53,11 +53,23 @@ func New(inner provider.Provider) *Bridge {
 // the point, since a MISSING entry fails nothing at all and the capability is
 // silently erased for every wrapped provider.
 var (
-	_ provider.Provider            = (*Bridge)(nil)
-	_ provider.PassthroughProvider = (*Bridge)(nil)
-	_ provider.ImageGenerator      = (*Bridge)(nil)
-	_ provider.ModelLister         = (*Bridge)(nil)
+	_ provider.Provider                     = (*Bridge)(nil)
+	_ provider.PassthroughProvider          = (*Bridge)(nil)
+	_ provider.ResponsesPassthroughProvider = (*Bridge)(nil)
+	_ provider.ImageGenerator               = (*Bridge)(nil)
+	_ provider.ModelLister                  = (*Bridge)(nil)
 )
+
+// ResponsesPassthrough preserves the wrapped provider's raw Responses
+// capability; Bridge must forward it because factory places Bridge outermost.
+func (b *Bridge) ResponsesPassthrough(ctx context.Context, body []byte, modelOverride string) (*http.Response, error) {
+	pp, ok := b.Provider.(provider.ResponsesPassthroughProvider)
+	if !ok {
+		return nil, agentmodel.NewErrorf(agentmodel.ErrTypeInvalidRequest,
+			"messagesbridge: wrapped provider does not support Responses passthrough")
+	}
+	return pp.ResponsesPassthrough(ctx, body, modelOverride)
+}
 
 // GenerateImage implements provider.ImageGenerator by forwarding to the
 // wrapped provider when it supports image generation. Bridge itself always

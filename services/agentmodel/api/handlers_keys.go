@@ -16,7 +16,7 @@ import (
 	"github.com/agent-in-the-shell/agent-in-the-shell/services/agentmodel/store"
 )
 
-// Runtime virtual-key management (#922). These endpoints live under the
+// Runtime virtual-key management. These endpoints live under the
 // masterOnly group: minting and revoking tenant credentials is operator
 // authority, never tenant authority. Tokens are minted here, returned once,
 // and never stored in plaintext — only their sha256 hash persists, the same
@@ -44,14 +44,17 @@ type keyCreateRequest struct {
 // token. Returned by list/info/revoke; the create response embeds it and adds
 // the one-time plaintext.
 type keyView struct {
+	Revision       int64           `json:"revision,omitempty"`
 	ID             string          `json:"id"`
 	Name           string          `json:"name"`
+	Kind           string          `json:"kind,omitempty"`
 	KeyHash        string          `json:"key_hash"`
 	Models         []string        `json:"models,omitempty"`
 	MaxBudget      *float64        `json:"max_budget,omitempty"`
 	BudgetDuration string          `json:"budget_duration,omitempty"`
 	ExpiresAt      *int64          `json:"expires_at,omitempty"`
 	Disabled       bool            `json:"disabled"`
+	RevokedAt      *int64          `json:"revoked_at,omitempty"`
 	Metadata       json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt      int64           `json:"created_at"`
 	Spend          *float64        `json:"spend,omitempty"` // lifetime USD; info endpoint only
@@ -66,6 +69,7 @@ type keyCreateResponse struct {
 
 func keyToView(mk store.ManagedKey) keyView {
 	v := keyView{
+		Revision:       mk.ServiceRevision,
 		ID:             mk.ID,
 		Name:           mk.Name,
 		KeyHash:        mk.KeyHash,
@@ -74,6 +78,15 @@ func keyToView(mk store.ManagedKey) keyView {
 		BudgetDuration: mk.BudgetDuration,
 		Disabled:       mk.Disabled,
 		CreatedAt:      mk.CreatedAt.Unix(),
+	}
+	if mk.PortalIssued {
+		v.Kind = "portal"
+	} else if mk.ServiceIssued {
+		v.Kind = "service"
+	}
+	if mk.RevokedAt != nil {
+		u := mk.RevokedAt.Unix()
+		v.RevokedAt = &u
 	}
 	if mk.ExpiresAt != nil {
 		u := mk.ExpiresAt.Unix()
@@ -183,33 +196,55 @@ func (s *Server) getKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
-// setKeyRevoked builds a handler that toggles a key's disabled flag. Revoking
-// retains the row so historical request_logs stay attributable.
-func (s *Server) setKeyRevoked(disabled bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.store == nil {
-			writeKeyStoreUnavailable(w)
-			return
-		}
-		id := chi.URLParam(r, "id")
-		switch err := s.store.SetKeyDisabled(r.Context(), id, disabled); {
-		case errors.Is(err, store.ErrNotFound):
+// revokeKey retires the credential without discarding its history.
+func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeKeyStoreUnavailable(w)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if err := s.store.DeleteKey(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			writeKeyNotFound(w)
-			return
-		case err != nil:
-			writeKeyStoreError(w, "could not update key")
+		} else {
+			writeKeyStoreError(w, "could not revoke key")
+		}
+		return
+	}
+	mk, ok := s.lookupKey(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, keyToView(mk))
+}
+
+func (s *Server) setKeyDisabled(disabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		mk, ok := s.lookupKey(w, r)
+		if !ok {
 			return
 		}
-		mk, err := s.store.GetKeyByID(r.Context(), id)
-		if err != nil {
-			writeKeyStoreError(w, "could not read back key")
+		if mk.RevokedAt != nil {
+			writeError(w, http.StatusConflict, &agentmodel.Error{Type: agentmodel.ErrTypeInvalidRequest, Code: "key_revoked", Message: "revocation is permanent; create a replacement credential"})
+			return
+		}
+		if err := s.store.SetKeyDisabled(r.Context(), mk.ID, disabled); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeKeyNotFound(w)
+			} else {
+				writeKeyStoreError(w, "could not update key")
+			}
+			return
+		}
+		mk, ok = s.lookupKey(w, r)
+		if !ok {
 			return
 		}
 		writeJSON(w, http.StatusOK, keyToView(mk))
 	}
 }
 
-// deleteKey hard-deletes a key. DELETE /v1/keys/{id}.
+// deleteKey is the legacy spelling of permanent revocation; rows are retained.
 func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeKeyStoreUnavailable(w)
@@ -244,14 +279,22 @@ func (s *Server) lookupKey(w http.ResponseWriter, r *http.Request) (store.Manage
 	return mk, true
 }
 
-// generateKeyToken mints a high-entropy bearer token. 32 bytes of CSPRNG
-// output, base64url-encoded, behind the sk-am- prefix.
+// generateKeyToken mints a high-entropy bearer token: randomToken behind the
+// sk-am- prefix.
 func generateKeyToken() (string, error) {
+	token, err := randomToken()
+	return keyTokenPrefix + token, err
+}
+
+// randomToken is the one CSPRNG token generator: 32 bytes, base64url without
+// padding (43 characters). API keys, the portal CSRF cookie and the CSP nonce
+// all use it.
+func randomToken() (string, error) {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	return keyTokenPrefix + base64.RawURLEncoding.EncodeToString(b[:]), nil
+	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
 // parsePositiveDuration accepts an empty string (→ 0, the "none" sentinel for
@@ -297,4 +340,33 @@ func writeKeyStoreError(w http.ResponseWriter, msg string) {
 
 func writeKeyStoreUnavailable(w http.ResponseWriter) {
 	writeError(w, http.StatusServiceUnavailable, &agentmodel.Error{Type: agentmodel.ErrTypeServiceUnavailable, Code: agentmodel.CodeAuthUnavailable, Message: "key store not configured"})
+}
+
+// Service-only stable-ID rotation. Personal keys use the identity-bound Portal.
+func (s *Server) rotateServiceKey(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if s.portalStore == nil {
+		writeKeyStoreUnavailable(w)
+		return
+	}
+	var body struct {
+		Revision int64 `json:"revision"`
+	}
+	if !decodePortalBody(w, r, &body) {
+		return
+	}
+	if body.Revision < 1 {
+		writeKeyArgError(w, "revision is required")
+		return
+	}
+	token, err := generateKeyToken()
+	if err != nil {
+		writeKeyStoreError(w, "could not generate key material")
+		return
+	}
+	key, err := s.portalStore.RotateServiceKey(r.Context(), chi.URLParam(r, "id"), body.Revision, hashAPIKey(token))
+	if portalStoreError(w, err) {
+		return
+	}
+	writeJSON(w, 200, keyCreateResponse{keyView: keyToView(key), Key: token})
 }
