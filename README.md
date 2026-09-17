@@ -1,6 +1,14 @@
 # Agent in the Shell
 
-Small Go tools for model access and local coding agents.
+> Focused binaries, explicit contracts. Use the pieces independently or compose
+> them into a larger system.
+
+Small Go tools for model access and local coding agents. Each service ships as a
+static binary, with external runtime tools documented explicitly. Independent
+deployment does not prevent collaboration through well-defined contracts.
+
+See [Design principles](docs/principles.md) for service boundaries and the
+public-transition compatibility policy.
 
 - **agent-model** is an OpenAI-compatible gateway with multi-provider routing,
   fallback, cost accounting, virtual keys and an optional employee portal.
